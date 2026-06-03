@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -40,8 +39,6 @@ var (
 	}
 )
 
-var errWorkflowDirMissing = errors.New("workflow directory missing")
-
 type checkRecord struct {
 	Workflow      string `json:"workflow"`
 	Line          int    `json:"line"`
@@ -72,10 +69,7 @@ type checkReport struct {
 }
 
 var (
-	usesLineExpr      = regexp.MustCompile(`^\s*uses:\s*([^\s#]+)\s*(?:#\s*(.+))?$`)
-	actionRefExpr     = regexp.MustCompile(`^([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*)@([^@]+)$`)
-	shaExpr           = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
-	trackingCommentRe = regexp.MustCompile(`ghapm:v(\d+)`)
+	usesLineExpr = regexp.MustCompile(`^\s*uses:\s*([^\s#]+)\s*(?:#\s*(.+))?$`)
 )
 
 func buildCheckReport(workflowDir string) (checkReport, error) {
@@ -138,32 +132,6 @@ func buildCheckReport(workflowDir string) (checkReport, error) {
 		Summary: summary,
 		Actions: records,
 	}, nil
-}
-
-func discoverWorkflowFiles(workflowDir string) ([]string, error) {
-	entries, err := os.ReadDir(workflowDir)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, errWorkflowDirMissing
-		}
-		return nil, fmt.Errorf("read workflow directory %q: %w", workflowDir, err)
-	}
-
-	var files []string
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-
-		name := entry.Name()
-		switch strings.ToLower(filepath.Ext(name)) {
-		case ".yml", ".yaml":
-			files = append(files, filepath.Join(workflowDir, name))
-		}
-	}
-
-	sort.Strings(files)
-	return files, nil
 }
 
 func parseWorkflowFile(path string) ([]checkRecord, error) {
