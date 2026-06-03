@@ -237,19 +237,21 @@ func writeCheckReportJSON(cmd *cobra.Command, report checkReport) error {
 func writeCheckReportText(cmd *cobra.Command, report checkReport, workflowDir string) {
 	out := cmd.OutOrStdout()
 
-	if len(report.Actions) == 0 {
-		if report.WorkflowDirMissing {
-			fmt.Fprintf(out, "Workflow directory %s not found; nothing to check\n", workflowDir)
-		} else {
-			fmt.Fprintf(out, "No GitHub Actions uses: references found under %s\n", workflowDir)
-		}
+	if report.WorkflowDirMissing {
+		fmt.Fprintln(out, colorize(fmt.Sprintf("Workflow directory %s not found; nothing to check", workflowDir), ansiRed))
 		return
 	}
 
+	if len(report.Actions) == 0 {
+		fmt.Fprintln(out, colorize(fmt.Sprintf("No GitHub Actions uses: references found under %s", workflowDir), ansiGray))
+		return
+	}
+
+	issuesByMessage := make(map[string][]checkRecord)
 	var (
-		issues  []checkRecord
-		tracked []checkRecord
-		ignored []checkRecord
+		issueOrder []string
+		tracked    []checkRecord
+		ignored    []checkRecord
 	)
 
 	for _, record := range report.Actions {
@@ -259,51 +261,72 @@ func writeCheckReportText(cmd *cobra.Command, report checkReport, workflowDir st
 		case "ignored":
 			ignored = append(ignored, record)
 		default:
-			issues = append(issues, record)
+			message := strings.TrimSpace(record.Message)
+			if message == "" {
+				message = "Unspecified issue"
+			}
+			if _, seen := issuesByMessage[message]; !seen {
+				issueOrder = append(issueOrder, message)
+			}
+			issuesByMessage[message] = append(issuesByMessage[message], record)
 		}
 	}
 
-	if len(issues) > 0 {
-		fmt.Fprintln(out, "Issues detected:")
-		for _, issue := range issues {
-			fmt.Fprintf(out, "- %s:%d %s@%s -> %s\n", issue.Workflow, issue.Line, issue.Action, issue.Ref, issue.Status)
-			if issue.Message != "" {
-				fmt.Fprintf(out, "  %s\n", issue.Message)
+	needsGap := false
+
+	if len(issueOrder) > 0 {
+		fmt.Fprintln(out, colorize("Issues detected:", ansiRed))
+		for idx, message := range issueOrder {
+			fmt.Fprintln(out, colorize("- "+message, ansiRed))
+			for _, issue := range issuesByMessage[message] {
+				line := fmt.Sprintf("  - %s:%d %s@%s -> %s", issue.Workflow, issue.Line, issue.Action, issue.Ref, issue.Status)
+				fmt.Fprintln(out, colorize(line, ansiRed))
+			}
+			if idx < len(issueOrder)-1 {
+				fmt.Fprintln(out)
 			}
 		}
+		needsGap = true
 	}
 
 	if len(tracked) > 0 {
-		if len(issues) > 0 {
+		if needsGap {
 			fmt.Fprintln(out)
 		}
-		fmt.Fprintln(out, "Tracked actions:")
+		fmt.Fprintln(out, colorize("Tracked actions:", ansiGreen))
 		for _, track := range tracked {
 			major := 0
 			if track.TrackingMajor != nil {
 				major = *track.TrackingMajor
 			}
-			fmt.Fprintf(out, "- %s:%d %s@%s (major v%d)\n", track.Workflow, track.Line, track.Action, track.Ref, major)
+			line := fmt.Sprintf("- %s:%d %s@%s (major v%d)", track.Workflow, track.Line, track.Action, track.Ref, major)
+			fmt.Fprintln(out, colorize(line, ansiGreen))
 		}
+		needsGap = true
 	}
 
 	if len(ignored) > 0 {
-		if len(issues)+len(tracked) > 0 {
+		if needsGap {
 			fmt.Fprintln(out)
 		}
-		fmt.Fprintln(out, "Ignored references:")
+		fmt.Fprintln(out, colorize("Ignored references:", ansiGray))
 		for _, item := range ignored {
-			fmt.Fprintf(out, "- %s:%d %s\n", item.Workflow, item.Line, item.Ref)
+			line := fmt.Sprintf("- %s:%d %s", item.Workflow, item.Line, item.Ref)
+			fmt.Fprintln(out, colorize(line, ansiGray))
 		}
+		needsGap = true
 	}
 
-	fmt.Fprintln(out)
-	fmt.Fprintf(out, "Summary: %d workflows, %d actions (%d remote)\n", report.Summary.WorkflowCount, report.Summary.ActionCount, report.Summary.RemoteCount)
-	fmt.Fprintf(out, "- Floating refs: %d\n", report.Summary.FloatingCount)
-	fmt.Fprintf(out, "- Dynamic refs: %d\n", report.Summary.DynamicCount)
-	fmt.Fprintf(out, "- Missing tracking comments: %d\n", report.Summary.MissingCount)
-	fmt.Fprintf(out, "- Invalid tracking comments: %d\n", report.Summary.InvalidCount)
-	fmt.Fprintf(out, "- Tracked commits: %d\n", report.Summary.TrackedCount)
+	if needsGap {
+		fmt.Fprintln(out)
+	}
+
+	fmt.Fprintln(out, colorize(fmt.Sprintf("Summary: %d workflows, %d actions (%d remote)", report.Summary.WorkflowCount, report.Summary.ActionCount, report.Summary.RemoteCount), ansiMagenta))
+	fmt.Fprintln(out, colorize(fmt.Sprintf("- Floating refs: %d", report.Summary.FloatingCount), ansiYellow))
+	fmt.Fprintln(out, colorize(fmt.Sprintf("- Dynamic refs: %d", report.Summary.DynamicCount), ansiYellow))
+	fmt.Fprintln(out, colorize(fmt.Sprintf("- Missing tracking comments: %d", report.Summary.MissingCount), ansiYellow))
+	fmt.Fprintln(out, colorize(fmt.Sprintf("- Invalid tracking comments: %d", report.Summary.InvalidCount), ansiYellow))
+	fmt.Fprintln(out, colorize(fmt.Sprintf("- Tracked commits: %d", report.Summary.TrackedCount), ansiGreen))
 }
 
 func init() {

@@ -23,7 +23,6 @@ var (
 	upgradeOutputJSON       bool
 	upgradeSafetyWindowDays int
 	upgradeUseAPI           bool
-	colorEnabled            = os.Getenv("NO_COLOR") == ""
 
 	upgradeCmd = &cobra.Command{
 		Use:   "upgrade",
@@ -95,16 +94,6 @@ const (
 	upgradeStateNone upgradeState = iota
 	upgradeStateCurrent
 	upgradeStateUpgrade
-)
-
-const (
-	ansiReset   = "\033[0m"
-	ansiGreen   = "\033[32m"
-	ansiYellow  = "\033[33m"
-	ansiRed     = "\033[31m"
-	ansiCyan    = "\033[36m"
-	ansiMagenta = "\033[35m"
-	ansiGray    = "\033[90m"
 )
 
 func init() {
@@ -574,13 +563,6 @@ func (r upgradeReport) filterChanges(status string) []upgradeChange {
 		}
 	}
 	return filtered
-}
-
-func colorize(text, color string) string {
-	if !colorEnabled || color == "" {
-		return text
-	}
-	return color + text + ansiReset
 }
 
 func majorSuffix(change upgradeChange) string {
