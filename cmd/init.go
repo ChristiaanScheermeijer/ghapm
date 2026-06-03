@@ -411,12 +411,12 @@ func writeInitReportText(cmd *cobra.Command, report initReport, workflowDir stri
 	out := cmd.OutOrStdout()
 
 	if report.WorkflowDirMissing {
-		fmt.Fprintf(out, "Workflow directory %s not found; nothing to initialize\n", workflowDir)
+		fmt.Fprintln(out, colorize(fmt.Sprintf("Workflow directory %s not found; nothing to initialize", workflowDir), ansiRed))
 		return
 	}
 
 	if report.Summary.ActionCount == 0 {
-		fmt.Fprintf(out, "No GitHub Actions uses: references found under %s\n", workflowDir)
+		fmt.Fprintln(out, colorize(fmt.Sprintf("No GitHub Actions uses: references found under %s", workflowDir), ansiGray))
 		return
 	}
 
@@ -440,73 +440,67 @@ func writeInitReportText(cmd *cobra.Command, report initReport, workflowDir stri
 		}
 	}
 
-	if len(pinned) > 0 {
-		fmt.Fprintln(out, "Pinned actions:")
-		for _, change := range pinned {
-			major := 0
-			if change.TrackingMajor != nil {
-				major = *change.TrackingMajor
-			}
-			fmt.Fprintf(out, "- %s:%d %s@%s -> %s (major v%d)\n", change.Workflow, change.Line, change.Action, change.OriginalRef, change.NewRef, major)
-			if change.Message != "" {
-				fmt.Fprintf(out, "  %s\n", change.Message)
-			}
-		}
-	}
+	needsGap := false
 
-	if len(already) > 0 {
-		if len(pinned) > 0 {
+	printChanges := func(title string, color string, items []initChange, formatter func(initChange) (string, string)) {
+		if len(items) == 0 {
+			return
+		}
+		if needsGap {
 			fmt.Fprintln(out)
 		}
-		fmt.Fprintln(out, "Already pinned:")
-		for _, change := range already {
-			major := ""
-			if change.TrackingMajor != nil {
-				major = fmt.Sprintf(" (major v%d)", *change.TrackingMajor)
-			}
-			fmt.Fprintf(out, "- %s:%d %s@%s%s\n", change.Workflow, change.Line, change.Action, change.OriginalRef, major)
-			if change.Message != "" {
-				fmt.Fprintf(out, "  %s\n", change.Message)
+		fmt.Fprintln(out, colorize(title, color))
+		for _, change := range items {
+			line, message := formatter(change)
+			fmt.Fprintln(out, colorize(line, color))
+			if msg := strings.TrimSpace(message); msg != "" {
+				fmt.Fprintln(out, colorize("  - "+msg, color))
 			}
 		}
+		needsGap = true
 	}
 
-	if len(skipped) > 0 {
-		if len(pinned)+len(already) > 0 {
-			fmt.Fprintln(out)
+	printChanges("Pinned actions:", ansiGreen, pinned, func(change initChange) (string, string) {
+		major := 0
+		if change.TrackingMajor != nil {
+			major = *change.TrackingMajor
 		}
-		fmt.Fprintln(out, "Skipped:")
-		for _, change := range skipped {
-			fmt.Fprintf(out, "- %s:%d %s@%s\n", change.Workflow, change.Line, change.Action, change.OriginalRef)
-			if change.Message != "" {
-				fmt.Fprintf(out, "  %s\n", change.Message)
-			}
+		line := fmt.Sprintf("- %s:%d %s@%s -> %s (major v%d)", change.Workflow, change.Line, change.Action, change.OriginalRef, change.NewRef, major)
+		return line, change.Message
+	})
+
+	printChanges("Already pinned:", ansiCyan, already, func(change initChange) (string, string) {
+		major := ""
+		if change.TrackingMajor != nil {
+			major = fmt.Sprintf(" (major v%d)", *change.TrackingMajor)
 		}
+		line := fmt.Sprintf("- %s:%d %s@%s%s", change.Workflow, change.Line, change.Action, change.OriginalRef, major)
+		return line, change.Message
+	})
+
+	printChanges("Skipped:", ansiYellow, skipped, func(change initChange) (string, string) {
+		line := fmt.Sprintf("- %s:%d %s@%s", change.Workflow, change.Line, change.Action, change.OriginalRef)
+		return line, change.Message
+	})
+
+	printChanges("Failed:", ansiRed, failed, func(change initChange) (string, string) {
+		line := fmt.Sprintf("- %s:%d %s@%s", change.Workflow, change.Line, change.Action, change.OriginalRef)
+		return line, change.Message
+	})
+
+	if needsGap {
+		fmt.Fprintln(out)
 	}
 
-	if len(failed) > 0 {
-		if len(pinned)+len(already)+len(skipped) > 0 {
-			fmt.Fprintln(out)
-		}
-		fmt.Fprintln(out, "Failed:")
-		for _, change := range failed {
-			fmt.Fprintf(out, "- %s:%d %s@%s\n", change.Workflow, change.Line, change.Action, change.OriginalRef)
-			if change.Message != "" {
-				fmt.Fprintf(out, "  %s\n", change.Message)
-			}
-		}
-	}
-
-	fmt.Fprintln(out)
-	fmt.Fprintf(out, "Summary: %d workflows scanned, %d actions processed\n", report.Summary.WorkflowCount, report.Summary.ActionCount)
-	fmt.Fprintf(out, "- Newly pinned: %d\n", report.Summary.PinnedCount)
-	fmt.Fprintf(out, "- Already pinned: %d\n", report.Summary.AlreadyPinnedCount)
-	fmt.Fprintf(out, "- Skipped: %d\n", report.Summary.SkippedCount)
-	fmt.Fprintf(out, "- Failed: %d\n", report.Summary.FailedCount)
-	fmt.Fprintf(out, "- Workflows updated: %d\n", report.Summary.ModifiedWorkflows)
+	fmt.Fprintln(out, colorize(fmt.Sprintf("Summary: %d workflows scanned, %d actions processed", report.Summary.WorkflowCount, report.Summary.ActionCount), ansiMagenta))
+	fmt.Fprintln(out, colorize(fmt.Sprintf("- Newly pinned: %d", report.Summary.PinnedCount), ansiGreen))
+	fmt.Fprintln(out, colorize(fmt.Sprintf("- Already pinned: %d", report.Summary.AlreadyPinnedCount), ansiCyan))
+	fmt.Fprintln(out, colorize(fmt.Sprintf("- Skipped: %d", report.Summary.SkippedCount), ansiYellow))
+	fmt.Fprintln(out, colorize(fmt.Sprintf("- Failed: %d", report.Summary.FailedCount), ansiRed))
+	fmt.Fprintln(out, colorize(fmt.Sprintf("- Workflows updated: %d", report.Summary.ModifiedWorkflows), ansiMagenta))
 
 	if dryRun {
-		fmt.Fprintln(out, "\nDry run mode; no files were modified.")
+		fmt.Fprintln(out, colorize("\nDry run mode; no files were modified.", ansiGray))
 	}
 }
 
