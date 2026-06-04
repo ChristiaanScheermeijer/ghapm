@@ -49,6 +49,7 @@ type upgradeChange struct {
 	Line                  int    `json:"line"`
 	Action                string `json:"action"`
 	CurrentRef            string `json:"currentRef"`
+	CurrentTag            string `json:"currentTag,omitempty"`
 	TrackedMajor          *int   `json:"trackedMajor,omitempty"`
 	TargetRef             string `json:"targetRef,omitempty"`
 	TargetMajor           *int   `json:"targetMajor,omitempty"`
@@ -354,6 +355,14 @@ func (r *tagResolver) transformLine(ctx context.Context, workflow, line string, 
 	change.TargetMajor = intPtr(ver.major)
 	change.TargetTag = targetTag.Name
 	change.TargetRef = targetTag.CommitSHA
+	change.CurrentTag = findTagForCommit(tags, currentRef)
+	currentVersion := change.CurrentTag
+	if strings.TrimSpace(currentVersion) == "" {
+		currentVersion = displayRef(change.CurrentRef)
+	}
+	if strings.TrimSpace(targetTag.Name) != "" {
+		change.Message = fmt.Sprintf("(%s -> %s)", currentVersion, targetTag.Name)
+	}
 
 	if change.MajorUpgradeAvailable && change.MajorUpgradeTag == change.TargetTag {
 		change.MajorUpgradeAvailable = false
@@ -376,10 +385,14 @@ func (r *tagResolver) transformLine(ctx context.Context, workflow, line string, 
 }
 
 func (r *tagResolver) selectUpgradeTarget(ctx context.Context, owner, repo string, tags []githubclient.Tag, trackedMajor int, currentCommit string) (*githubclient.Tag, upgradeState, string, *githubclient.Tag, string, error) {
-	var highestMajor *githubclient.Tag
-	var highestMajorSafe *githubclient.Tag
-	var highestMajorReason string
-	var sameMajorReason string
+	var (
+		highestMajor       *githubclient.Tag
+		highestMajorSafe   *githubclient.Tag
+		highestMajorReason string
+		sameMajorReason    string
+		bestSameMajor      *githubclient.Tag
+		currentIsPinned    bool
+	)
 
 	for _, tag := range tags {
 		ver := parseTagVersion(tag.Name)
@@ -389,21 +402,20 @@ func (r *tagResolver) selectUpgradeTarget(ctx context.Context, owner, repo strin
 				highestMajor = &clone
 			}
 
-			safe, reason, err := r.isTagSafe(ctx, owner, repo, tag.CommitSHA)
-			if err != nil {
-				return nil, upgradeStateNone, "", highestMajorSafe, reason, err
+			if highestMajorSafe == nil {
+				safe, reason, err := r.isTagSafe(ctx, owner, repo, tag.CommitSHA)
+				if err != nil {
+					return nil, upgradeStateNone, "", highestMajorSafe, reason, err
+				}
+				if safe {
+					clone := tag
+					highestMajorSafe = &clone
+					highestMajorReason = ""
+				} else if highestMajorReason == "" {
+					highestMajorReason = fmt.Sprintf("%s: %s", tag.Name, reason)
+				}
 			}
-			if safe && highestMajorSafe == nil {
-				clone := tag
-				highestMajorSafe = &clone
-				highestMajorReason = ""
-			}
-			if !safe && highestMajorReason == "" {
-				highestMajorReason = fmt.Sprintf("%s: %s", tag.Name, reason)
-			}
-			if !r.allowMajor {
-				continue
-			}
+			continue
 		}
 
 		if ver.major != trackedMajor {
@@ -423,23 +435,41 @@ func (r *tagResolver) selectUpgradeTarget(ctx context.Context, owner, repo strin
 		}
 
 		if strings.EqualFold(tag.CommitSHA, currentCommit) {
-			clone := tag
-			return &clone, upgradeStateCurrent, "", highestMajorSafe, highestMajorReason, nil
+			currentIsPinned = true
+			continue
 		}
 
 		clone := tag
-		return &clone, upgradeStateUpgrade, "", highestMajorSafe, highestMajorReason, nil
+		bestSameMajor = &clone
+		break
+	}
+
+	if r.allowMajor && highestMajorSafe != nil {
+		return highestMajorSafe, upgradeStateUpgrade, "", nil, "", nil
+	}
+
+	if bestSameMajor != nil {
+		return bestSameMajor, upgradeStateUpgrade, "", highestMajorSafe, highestMajorReason, nil
+	}
+
+	var majorCandidate *githubclient.Tag
+	var majorReason string
+	if highestMajorSafe != nil {
+		majorCandidate = highestMajorSafe
+	} else if highestMajor != nil {
+		majorCandidate = highestMajor
+		majorReason = highestMajorReason
+	}
+
+	if currentIsPinned {
+		return nil, upgradeStateCurrent, "", majorCandidate, majorReason, nil
 	}
 
 	if sameMajorReason != "" {
-		return nil, upgradeStateNone, sameMajorReason, highestMajorSafe, highestMajorReason, nil
+		return nil, upgradeStateNone, sameMajorReason, majorCandidate, majorReason, nil
 	}
 
-	if highestMajorSafe != nil {
-		return nil, upgradeStateNone, "No eligible tagged release found", highestMajorSafe, "", nil
-	}
-
-	return nil, upgradeStateNone, "No eligible tagged release found", highestMajor, highestMajorReason, nil
+	return nil, upgradeStateNone, "No eligible tagged release found", majorCandidate, majorReason, nil
 }
 
 func (r *tagResolver) isTagSafe(ctx context.Context, owner, repo, sha string) (bool, string, error) {
@@ -497,23 +527,34 @@ func writeUpgradeReportText(cmd *cobra.Command, report upgradeReport, workflowDi
 		} else if change.TrackedMajor != nil {
 			targetMajor = *change.TrackedMajor
 		}
-		ref := displayRef(change.TargetRef)
-		if ref == "" {
-			ref = displayRef(change.TargetTag)
+		currentDisplay := change.CurrentTag
+		if currentDisplay == "" {
+			currentDisplay = displayRef(change.CurrentRef)
 		}
-		if ref == "" {
-			ref = "(unknown)"
+		targetDisplay := change.TargetTag
+		if strings.TrimSpace(targetDisplay) == "" {
+			targetDisplay = displayRef(change.TargetRef)
 		}
-		base := fmt.Sprintf("- %s:%d %s@%s -> %s (major v%d)", change.Workflow, change.Line, change.Action, displayRef(change.CurrentRef), ref, targetMajor)
-		suffix := majorSuffix(change)
+		if targetDisplay == "" {
+			targetDisplay = "(unknown)"
+		}
+		base := fmt.Sprintf("- %s:%d %s@%s -> %s (major v%d)", change.Workflow, change.Line, change.Action, currentDisplay, targetDisplay, targetMajor)
 		if msg := strings.TrimSpace(change.Message); msg != "" {
-			suffix = " -> " + msg + suffix
+			base = base + " " + msg
 		}
-		return strings.TrimSuffix(base+suffix, " ")
+		suffix := majorSuffix(change)
+		if suffix != "" {
+			base += suffix
+		}
+		return base
 	})
 
 	printGroup("Already up to date:", ansiCyan, report.filterChanges("up-to-date"), func(change upgradeChange) string {
-		base := fmt.Sprintf("- %s:%d %s@%s", change.Workflow, change.Line, change.Action, displayRef(change.CurrentRef))
+		currentDisplay := change.CurrentTag
+		if currentDisplay == "" {
+			currentDisplay = displayRef(change.CurrentRef)
+		}
+		base := fmt.Sprintf("- %s:%d %s@%s", change.Workflow, change.Line, change.Action, currentDisplay)
 		suffix := majorSuffix(change)
 		if suffix == "" {
 			suffix = " -> Up to date"
@@ -522,7 +563,11 @@ func writeUpgradeReportText(cmd *cobra.Command, report upgradeReport, workflowDi
 	})
 
 	printGroup("Skipped:", ansiYellow, report.filterChanges("skipped"), func(change upgradeChange) string {
-		base := fmt.Sprintf("- %s:%d %s@%s", change.Workflow, change.Line, change.Action, displayRef(change.CurrentRef))
+		currentDisplay := change.CurrentTag
+		if currentDisplay == "" {
+			currentDisplay = displayRef(change.CurrentRef)
+		}
+		base := fmt.Sprintf("- %s:%d %s@%s", change.Workflow, change.Line, change.Action, currentDisplay)
 		suffix := ""
 		if msg := strings.TrimSpace(change.Message); msg != "" {
 			suffix = " -> " + msg
@@ -532,7 +577,11 @@ func writeUpgradeReportText(cmd *cobra.Command, report upgradeReport, workflowDi
 	})
 
 	printGroup("Failed:", ansiRed, report.filterChanges("error"), func(change upgradeChange) string {
-		base := fmt.Sprintf("- %s:%d %s@%s", change.Workflow, change.Line, change.Action, displayRef(change.CurrentRef))
+		currentDisplay := change.CurrentTag
+		if currentDisplay == "" {
+			currentDisplay = displayRef(change.CurrentRef)
+		}
+		base := fmt.Sprintf("- %s:%d %s@%s", change.Workflow, change.Line, change.Action, currentDisplay)
 		suffix := ""
 		if msg := strings.TrimSpace(change.Message); msg != "" {
 			suffix = " -> " + msg
@@ -585,6 +634,19 @@ func displayRef(ref string) string {
 		return ref[:12]
 	}
 	return ref
+}
+
+func findTagForCommit(tags []githubclient.Tag, commit string) string {
+	commit = strings.TrimSpace(commit)
+	if commit == "" {
+		return ""
+	}
+	for _, tag := range tags {
+		if strings.EqualFold(tag.CommitSHA, commit) {
+			return tag.Name
+		}
+	}
+	return ""
 }
 
 func parseTagVersion(name string) struct{ major, minor, patch int } {
