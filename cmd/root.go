@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	githubclient "github.com/christiaanscheermeijer/ghapm/internal/githubclient"
 	"github.com/spf13/cobra"
 )
 
@@ -31,4 +32,13 @@ func Execute() {
 
 func init() {
 	rootCmd.SetVersionTemplate("ghapm version {{.Version}}\n")
+	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Enable verbose logging")
+
+	cobra.OnInitialize(func() {
+		if verbose {
+			githubclient.SetLogger(debugf)
+		} else {
+			githubclient.SetLogger(nil)
+		}
+	})
 }

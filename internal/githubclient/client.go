@@ -61,6 +61,21 @@ type commitEntry struct {
 	set  bool
 }
 
+var logFunc = func(string, ...interface{}) {}
+
+// SetLogger assigns a function used for verbose logging of client operations.
+func SetLogger(fn func(string, ...interface{})) {
+	if fn == nil {
+		logFunc = func(string, ...interface{}) {}
+		return
+	}
+	logFunc = fn
+}
+
+func logf(format string, args ...interface{}) {
+	logFunc(format, args...)
+}
+
 type cachingClient struct {
 	inner      Client
 	mu         sync.Mutex
@@ -73,9 +88,11 @@ func (c *cachingClient) ListTags(ctx context.Context, owner, repo string) ([]Tag
 	c.mu.Lock()
 	if tags, ok := c.tagCache[key]; ok {
 		c.mu.Unlock()
+		logf("cache hit: tags for %s/%s", owner, repo)
 		return tags, nil
 	}
 	c.mu.Unlock()
+	logf("fetching tags for %s/%s", owner, repo)
 
 	tags, err := c.inner.ListTags(ctx, owner, repo)
 	if err != nil {
@@ -85,6 +102,7 @@ func (c *cachingClient) ListTags(ctx context.Context, owner, repo string) ([]Tag
 	c.mu.Lock()
 	c.tagCache[key] = tags
 	c.mu.Unlock()
+	logf("cached %d tags for %s/%s", len(tags), owner, repo)
 	return tags, nil
 }
 
@@ -100,9 +118,11 @@ func (c *cachingClient) CommitDate(ctx context.Context, owner, repo, sha string)
 	}
 	if entry, ok := repoCache[sha]; ok && entry.set {
 		c.mu.Unlock()
+		logf("cache hit: commit date for %s/%s@%s", owner, repo, sha)
 		return entry.when, entry.ok, nil
 	}
 	c.mu.Unlock()
+	logf("fetching commit date for %s/%s@%s", owner, repo, sha)
 
 	when, ok, err := c.inner.CommitDate(ctx, owner, repo, sha)
 	if err != nil {
@@ -112,6 +132,7 @@ func (c *cachingClient) CommitDate(ctx context.Context, owner, repo, sha string)
 	c.mu.Lock()
 	repoCache[sha] = commitEntry{when: when, ok: ok, set: true}
 	c.mu.Unlock()
+	logf("cached commit date for %s/%s@%s (ok=%v)", owner, repo, sha, ok)
 
 	return when, ok, nil
 }
@@ -126,6 +147,7 @@ func (cli *cliClient) ListTags(ctx context.Context, owner, repo string) ([]Tag, 
 
 	for page := 1; ; page++ {
 		endpoint := fmt.Sprintf("repos/%s/%s/tags?per_page=%d&page=%d", owner, repo, perPage, page)
+		logf("gh api: %s", endpoint)
 		out, err := cli.run(ctx, endpoint)
 		if err != nil {
 			return nil, err
@@ -161,6 +183,7 @@ func (cli *cliClient) ListTags(ctx context.Context, owner, repo string) ([]Tag, 
 
 func (cli *cliClient) CommitDate(ctx context.Context, owner, repo, sha string) (time.Time, bool, error) {
 	endpoint := path.Join("repos", owner, repo, "commits", sha)
+	logf("gh api: %s", endpoint)
 	out, err := cli.run(ctx, endpoint)
 	if err != nil {
 		return time.Time{}, false, err
@@ -219,6 +242,7 @@ func (r *restClient) ListTags(ctx context.Context, owner, repo string) ([]Tag, e
 	var tags []Tag
 	for page := 1; page <= maxPages; page++ {
 		endpoint := fmt.Sprintf("https://api.github.com/repos/%s/%s/tags?per_page=%d&page=%d", owner, repo, perPage, page)
+		logf("GET %s", endpoint)
 		var payload []struct {
 			Name   string `json:"name"`
 			Commit struct {
@@ -249,6 +273,7 @@ func (r *restClient) ListTags(ctx context.Context, owner, repo string) ([]Tag, e
 
 func (r *restClient) CommitDate(ctx context.Context, owner, repo, sha string) (time.Time, bool, error) {
 	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/%s/commits/%s", owner, repo, sha)
+	logf("GET %s", endpoint)
 	var payload struct {
 		Commit struct {
 			Author struct {
