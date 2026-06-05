@@ -1,19 +1,17 @@
 package cmd
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
 
+	githubclient "github.com/christiaanscheermeijer/ghapm/internal/githubclient"
 	"github.com/spf13/cobra"
 )
 
@@ -21,13 +19,14 @@ var (
 	initWorkflowDir string
 	initDryRun      bool
 	initOutputJSON  bool
+	initUseAPI      bool
 
 	initCmd = &cobra.Command{
 		Use:   "init",
 		Short: "Pin all workflow actions to specific commits",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			report, err := runInit(initWorkflowDir, initDryRun)
+			report, err := runInit(cmd.Context(), initWorkflowDir, initDryRun, initUseAPI)
 			if err != nil {
 				return err
 			}
@@ -83,90 +82,15 @@ var (
 	majorVersionCandidateRe = regexp.MustCompile(`^[vV]?(\d+)`)
 )
 
-type refResolver interface {
-	Resolve(ownerRepo, ref string) (string, error)
+type initResolver struct {
+	client githubclient.Client
 }
 
-type gitLsRemoteResolver struct {
-	cache map[string]string
+func (r *initResolver) Resolve(ctx context.Context, owner, repo, ref string) (string, error) {
+	return r.client.ResolveRef(ctx, owner, repo, ref)
 }
 
-func newGitLsRemoteResolver() *gitLsRemoteResolver {
-	return &gitLsRemoteResolver{cache: make(map[string]string)}
-}
-
-func (r *gitLsRemoteResolver) Resolve(ownerRepo, ref string) (string, error) {
-	key := ownerRepo + "@" + ref
-	if sha, ok := r.cache[key]; ok {
-		return sha, nil
-	}
-
-	repoURL := fmt.Sprintf("https://github.com/%s.git", ownerRepo)
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "git", "ls-remote", repoURL, ref)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return "", fmt.Errorf("timeout resolving %s@%s", ownerRepo, ref)
-		}
-		return "", fmt.Errorf("git ls-remote failed for %s@%s: %w (%s)", ownerRepo, ref, err, strings.TrimSpace(stderr.String()))
-	}
-
-	sha, err := parseLsRemoteOutput(stdout.String(), ref)
-	if err != nil {
-		return "", fmt.Errorf("resolve %s@%s: %w", ownerRepo, ref, err)
-	}
-
-	r.cache[key] = sha
-	return sha, nil
-}
-
-func parseLsRemoteOutput(output, ref string) (string, error) {
-	out := strings.TrimSpace(output)
-	if out == "" {
-		return "", fmt.Errorf("ref %q not found", ref)
-	}
-
-	lines := strings.Split(out, "\n")
-	var (
-		peeled string
-		first  string
-	)
-
-	for _, line := range lines {
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
-			continue
-		}
-
-		sha := fields[0]
-		name := fields[1]
-
-		if strings.HasSuffix(name, "^{}") {
-			peeled = sha
-		}
-
-		if first == "" {
-			first = sha
-		}
-	}
-
-	if peeled != "" {
-		return peeled, nil
-	}
-	if first != "" {
-		return first, nil
-	}
-
-	return "", fmt.Errorf("unable to determine commit for ref %q", ref)
-}
-
-func runInit(workflowDir string, dryRun bool) (initReport, error) {
+func runInit(ctx context.Context, workflowDir string, dryRun bool, useAPI bool) (initReport, error) {
 	files, err := discoverWorkflowFiles(workflowDir)
 	if err != nil {
 		if errors.Is(err, errWorkflowDirMissing) {
@@ -182,10 +106,10 @@ func runInit(workflowDir string, dryRun bool) (initReport, error) {
 		},
 	}
 
-	resolver := newGitLsRemoteResolver()
+	resolver := &initResolver{client: newGitHubClient(useAPI)}
 
 	for _, file := range files {
-		fileChanges, stats, fileChanged, err := processWorkflowFile(file, resolver, dryRun)
+		fileChanges, stats, fileChanged, err := processInitWorkflowFile(ctx, file, resolver, dryRun)
 		report.Changes = append(report.Changes, fileChanges...)
 		report.Summary.ActionCount += stats.Actions
 		report.Summary.PinnedCount += stats.Pinned
@@ -205,16 +129,14 @@ func runInit(workflowDir string, dryRun bool) (initReport, error) {
 	return report, nil
 }
 
-func processWorkflowFile(path string, resolver refResolver, dryRun bool) ([]initChange, initFileStats, bool, error) {
+func processInitWorkflowFile(ctx context.Context, path string, resolver *initResolver, dryRun bool) ([]initChange, initFileStats, bool, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, initFileStats{}, false, fmt.Errorf("read workflow %q: %w", path, err)
 	}
 
-	original := string(data)
-	lines := strings.Split(original, "\n")
+	lines := strings.Split(string(data), "\n")
 	newLines := make([]string, len(lines))
-
 	workflowPath := filepath.ToSlash(path)
 
 	var (
@@ -226,7 +148,7 @@ func processWorkflowFile(path string, resolver refResolver, dryRun bool) ([]init
 	for idx, line := range lines {
 		lineNumber := idx + 1
 
-		newLine, change, lineChanged, err := transformUsesLine(workflowPath, line, lineNumber, resolver)
+		newLine, change, lineChanged, err := transformInitLine(ctx, resolver, workflowPath, line, lineNumber)
 		if change != nil {
 			stats.Actions++
 			switch change.Status {
@@ -257,7 +179,6 @@ func processWorkflowFile(path string, resolver refResolver, dryRun bool) ([]init
 		if err != nil {
 			return changes, stats, fileChange, fmt.Errorf("stat workflow %q: %w", path, err)
 		}
-
 		updated := strings.Join(newLines, "\n")
 		if err := os.WriteFile(path, []byte(updated), info.Mode()); err != nil {
 			return changes, stats, fileChange, fmt.Errorf("write workflow %q: %w", path, err)
@@ -267,7 +188,7 @@ func processWorkflowFile(path string, resolver refResolver, dryRun bool) ([]init
 	return changes, stats, fileChange, nil
 }
 
-func transformUsesLine(workflow, line string, lineNumber int, resolver refResolver) (string, *initChange, bool, error) {
+func transformInitLine(ctx context.Context, resolver *initResolver, workflow, line string, lineNumber int) (string, *initChange, bool, error) {
 	match := initUsesLineExpr.FindStringSubmatch(line)
 	if match == nil {
 		return line, nil, false, nil
@@ -291,7 +212,9 @@ func transformUsesLine(workflow, line string, lineNumber int, resolver refResolv
 		return line, nil, false, nil
 	}
 
-	ownerRepo := strings.Join(parts[:2], "/")
+	owner := parts[0]
+	repo := parts[1]
+
 	change := initChange{
 		Workflow:    workflow,
 		Line:        lineNumber,
@@ -328,7 +251,7 @@ func transformUsesLine(workflow, line string, lineNumber int, resolver refResolv
 		return line, &change, false, nil
 	}
 
-	commit, err := resolver.Resolve(ownerRepo, change.OriginalRef)
+	sha, err := resolver.Resolve(ctx, owner, repo, change.OriginalRef)
 	if err != nil {
 		change.Status = "error"
 		change.Message = err.Error()
@@ -336,11 +259,11 @@ func transformUsesLine(workflow, line string, lineNumber int, resolver refResolv
 	}
 
 	change.Status = "pinned"
-	change.NewRef = commit
+	change.NewRef = sha
 	change.TrackingMajor = &major
-	change.Message = fmt.Sprintf("Pinned to commit %s", shortCommit(commit))
+	change.Message = fmt.Sprintf("Pinned to commit %s", shortCommit(sha))
 
-	newUses := actionMatch[1] + "@" + commit
+	newUses := actionMatch[1] + "@" + sha
 	comment := mergeTrackingComment(commentValue, major)
 	spacing := commentSpacing
 	if comment != "" && spacing == "" {
@@ -508,5 +431,6 @@ func init() {
 	initCmd.Flags().StringVar(&initWorkflowDir, "workflows", ".github/workflows", "Directory that contains workflow files")
 	initCmd.Flags().BoolVar(&initDryRun, "dry-run", false, "Preview changes without modifying files")
 	initCmd.Flags().BoolVar(&initOutputJSON, "json", false, "Emit machine-readable JSON output")
+	initCmd.Flags().BoolVar(&initUseAPI, "api", false, "Use GitHub REST API instead of the gh CLI")
 	rootCmd.AddCommand(initCmd)
 }

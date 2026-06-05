@@ -116,8 +116,7 @@ func runUpgrade(ctx context.Context) (upgradeReport, error) {
 		return upgradeReport{}, err
 	}
 
-	baseClient := selectClient()
-	client := githubclient.NewCachingClient(baseClient)
+	client := newGitHubClient(upgradeUseAPI)
 
 	report := upgradeReport{
 		Summary: upgradeSummary{
@@ -166,13 +165,6 @@ func runUpgrade(ctx context.Context) (upgradeReport, error) {
 	}
 
 	return report, nil
-}
-
-func selectClient() githubclient.Client {
-	if upgradeUseAPI {
-		return githubclient.NewRESTClient(os.Getenv("GITHUB_TOKEN"))
-	}
-	return githubclient.NewCLIClient()
 }
 
 func processUpgradeWorkflowFile(ctx context.Context, path string, resolver *tagResolver, dryRun bool) ([]upgradeChange, upgradeFileStats, bool, error) {

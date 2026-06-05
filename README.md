@@ -1,6 +1,6 @@
 # GitHub Actions Package Manager
 
-GitHub Actions Package Manager (ghapm) keeps your workflow files reproducible by pinning every `uses:` reference to an exact commit while still tracking upstream releases.
+GitHub Actions Package Manager (ghapm) keeps your workflow files reproducible by pinning every `uses:` reference to an exact commit while still tracking upstream releases, highlighting safe upgrades, and honoring a configurable safety window.
 
 ```diff
 - uses: actions/checkout@v4
@@ -19,11 +19,9 @@ $ yarn global add ghapm
 
 ## Commands
 
-- `ghapm init` &mdash; pin floating `uses:` references to commit SHAs and record the tracked major version (`# ghapm: vX`).
-- `ghapm check` &mdash; report available minor and patch updates that are at least 14 days old, and flag newer major releases.
-- `ghapm upgrade [--major]` &mdash; update pinned commits to the latest safe release; pass `--major` to opt in to major bumps.
-
-> The current implementation provides scaffolding for these commands. The workflow discovery logic, GitHub release resolution, and upgrade engine still need to be implemented.
+- `ghapm init` &mdash; scan workflow files, pin floating `uses:` references to commit SHAs, and append/update the tracking comment (`# ghapm:vX`). Existing pins are preserved unless the annotation needs to be refreshed. Supports `--api` to resolve refs via the REST API instead of the `gh` CLI.
+- `ghapm check` &mdash; analyze workflow files locally and categorize each reference (floating, dynamic, tracked, missing annotation, etc.). Groups identical issues with colorized output and supports `--json` for machine-readable reports. (Remote release validation is planned in a future version.)
+- `ghapm upgrade [--major]` &mdash; move pinned actions to the newest safe release. Respects the tracked major line, updates the annotation, and shows `(old -> new)` version ranges. Add `--major` to allow bumping to the next safe major, `--dry-run` to preview, `--safety-window` to override the default 14 days, `--api` to use the REST API instead of `gh`, and `--verbose` to log GitHub requests.
 
 ## Development
 

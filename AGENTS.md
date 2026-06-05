@@ -14,17 +14,19 @@ commit while still tracking upstream releases.
 
 1. **Initialize (`ghapm init`)**
     - Scan workflow files for `uses:` statements.
-    - For unpinned references, resolve the latest safe commit, lock it in place, and append a tracking comment such as
-      `# ghapm:v4`.
-    - Skip entries that already point to a commit SHA.
+    - For unpinned references, resolve the latest safe commit via the shared GitHub client (gh CLI by default, REST with
+      `--api`), lock it in place, and append a tracking comment such as `# ghapm:v4`.
+    - Preserve pinned references, updating their annotation when necessary.
 2. **Monitor (`ghapm check`)**
-    - Compare pinned commits with upstream releases within the tagged major version recorded in the comment.
-    - Report available minor and patch updates that have cleared the 14-day safety window.
-    - Flag major-version releases separately so maintainers can plan breaking changes.
+    - Analyze workflow files locally and categorize each `uses:` reference (tracked, floating, missing annotation, etc.).
+    - Group identical issues, colorize terminal output by default, and support JSON emission.
+    - Highlight entries that would need attention before running `init` or `upgrade`; remote version validation is not yet performed.
 3. **Upgrade (`ghapm upgrade [--major]`)**
-    - For each action, move the pinned commit to the newest safe release allowed by the tracked major version.
-    - Respect the `# ghapm:vX` annotation unless `--major` is provided, in which case the tool may bump to the next
-      major and update the comment accordingly.
+    - For each action, move the pinned commit to the newest safe release allowed by the tracked major version (updating the
+      `# ghapm:vX` annotation as needed).
+    - With `--major`, opt in to the newest safe higher major; the resolver short-circuits once it finds an eligible release
+      and updates both the commit and annotation accordingly.
+    - Supports `--dry-run`, `--json`, `--safety-window`, `--api`, and `--verbose` flags.
 
 ## Inline Annotation Format
 
@@ -36,10 +38,12 @@ commit while still tracking upstream releases.
 
 - **Safety delay**: ignore releases younger than 14 days.
 - **Minor/Patch**: automatically eligible when within the tracked major.
-- **Major**: reported during `check`; applied only when explicitly requested with `--major`.
+- **Major**: reported during `upgrade`; applied only when explicitly requested with `--major`.
+- **Logging**: `--verbose` prints cache hits/misses and GitHub requests to stderr for all commands.
 
 ## Open Questions / Next Steps
 
 - Define how ghapm discovers workflow files (convention vs. configuration).
 - Decide on handling private actions or enterprise registries.
-- Determine the reporting format for `check` (CLI table, JSON output, exit codes).
+- Extend reporting formats beyond the current colorized/text and JSON outputs (e.g., richer tables, exit codes).
+- Add remote release validation to `check` so it can surface actionable upgrades without running `upgrade`.

@@ -28,6 +28,8 @@ type Client interface {
 	// CommitDate returns the commit timestamp in UTC. The second return indicates whether the
 	// date is authoritative (false when metadata is missing).
 	CommitDate(ctx context.Context, owner, repo, sha string) (time.Time, bool, error)
+	// ResolveRef resolves a tag or branch reference to a commit SHA.
+	ResolveRef(ctx context.Context, owner, repo, ref string) (string, error)
 }
 
 // NewCachingClient wraps an inner client with in-memory caching to avoid duplicate requests.
@@ -36,6 +38,7 @@ func NewCachingClient(inner Client) Client {
 		inner:      inner,
 		tagCache:   make(map[string][]Tag),
 		commitDate: make(map[string]map[string]commitEntry),
+		refCache:   make(map[string]map[string]string),
 	}
 }
 
@@ -63,6 +66,22 @@ type commitEntry struct {
 
 var logFunc = func(string, ...interface{}) {}
 
+func isFullSHA(ref string) bool {
+	if len(ref) != 40 {
+		return false
+	}
+	for _, r := range ref {
+		switch {
+		case r >= '0' && r <= '9':
+		case r >= 'a' && r <= 'f':
+		case r >= 'A' && r <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // SetLogger assigns a function used for verbose logging of client operations.
 func SetLogger(fn func(string, ...interface{})) {
 	if fn == nil {
@@ -81,6 +100,7 @@ type cachingClient struct {
 	mu         sync.Mutex
 	tagCache   map[string][]Tag
 	commitDate map[string]map[string]commitEntry
+	refCache   map[string]map[string]string
 }
 
 func (c *cachingClient) ListTags(ctx context.Context, owner, repo string) ([]Tag, error) {
@@ -135,6 +155,40 @@ func (c *cachingClient) CommitDate(ctx context.Context, owner, repo, sha string)
 	logf("cached commit date for %s/%s@%s (ok=%v)", owner, repo, sha, ok)
 
 	return when, ok, nil
+}
+
+func (c *cachingClient) ResolveRef(ctx context.Context, owner, repo, ref string) (string, error) {
+	if isFullSHA(ref) {
+		return strings.ToLower(ref), nil
+	}
+
+	key := owner + "/" + repo
+	c.mu.Lock()
+	repoCache, ok := c.refCache[key]
+	if !ok {
+		repoCache = make(map[string]string)
+		c.refCache[key] = repoCache
+	}
+	if sha, ok := repoCache[ref]; ok {
+		c.mu.Unlock()
+		logf("cache hit: ref %s/%s@%s", owner, repo, ref)
+		return sha, nil
+	}
+	c.mu.Unlock()
+
+	logf("resolving ref %s/%s@%s", owner, repo, ref)
+	sha, err := c.inner.ResolveRef(ctx, owner, repo, ref)
+	if err != nil {
+		return "", err
+	}
+	lower := strings.ToLower(sha)
+
+	c.mu.Lock()
+	repoCache[ref] = lower
+	c.mu.Unlock()
+	logf("cached ref %s/%s@%s -> %s", owner, repo, ref, lower)
+
+	return lower, nil
 }
 
 // --- CLI implementation -------------------------------------------------------
@@ -228,6 +282,47 @@ func (cli *cliClient) run(ctx context.Context, endpoint string) ([]byte, error) 
 	return output, nil
 }
 
+func (cli *cliClient) ResolveRef(ctx context.Context, owner, repo, ref string) (string, error) {
+	if isFullSHA(ref) {
+		return strings.ToLower(ref), nil
+	}
+
+	attempts := []string{
+		fmt.Sprintf("repos/%s/%s/git/ref/tags/%s", owner, repo, ref),
+		fmt.Sprintf("repos/%s/%s/git/ref/heads/%s", owner, repo, ref),
+		fmt.Sprintf("repos/%s/%s/git/ref/%s", owner, repo, ref),
+	}
+
+	for _, endpoint := range attempts {
+		sha, found, err := cli.resolveRefEndpoint(ctx, endpoint)
+		if err != nil {
+			return "", err
+		}
+		if found {
+			return strings.ToLower(sha), nil
+		}
+	}
+
+	return "", fmt.Errorf("ref %q not found", ref)
+}
+
+func (cli *cliClient) resolveRefEndpoint(ctx context.Context, endpoint string) (string, bool, error) {
+	logf("gh api: %s", endpoint)
+	cmd := exec.CommandContext(ctx, "gh", "api", endpoint, "--jq", ".object.sha")
+	output, err := cmd.CombinedOutput()
+	result := strings.TrimSpace(string(output))
+	if err != nil {
+		if strings.Contains(result, "404") {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("gh api %s: %v: %s", endpoint, err, result)
+	}
+	if result == "" {
+		return "", false, nil
+	}
+	return result, true, nil
+}
+
 // --- REST implementation ------------------------------------------------------
 
 type restClient struct {
@@ -305,6 +400,35 @@ func (r *restClient) CommitDate(ctx context.Context, owner, repo, sha string) (t
 	return when.UTC(), true, nil
 }
 
+func (r *restClient) ResolveRef(ctx context.Context, owner, repo, ref string) (string, error) {
+	if isFullSHA(ref) {
+		return strings.ToLower(ref), nil
+	}
+
+	attempts := []string{
+		fmt.Sprintf("https://api.github.com/repos/%s/%s/git/ref/tags/%s", owner, repo, ref),
+		fmt.Sprintf("https://api.github.com/repos/%s/%s/git/ref/heads/%s", owner, repo, ref),
+		fmt.Sprintf("https://api.github.com/repos/%s/%s/git/ref/%s", owner, repo, ref),
+	}
+
+	for _, url := range attempts {
+		var payload struct {
+			Object struct {
+				SHA string `json:"sha"`
+			} `json:"object"`
+		}
+		ok, err := r.tryGetJSON(ctx, url, &payload)
+		if err != nil {
+			return "", err
+		}
+		if ok && payload.Object.SHA != "" {
+			return strings.ToLower(payload.Object.SHA), nil
+		}
+	}
+
+	return "", fmt.Errorf("ref %q not found", ref)
+}
+
 func (r *restClient) getJSON(ctx context.Context, url string, target interface{}) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -333,6 +457,42 @@ func (r *restClient) getJSON(ctx context.Context, url string, target interface{}
 	}
 
 	return nil
+}
+
+func (r *restClient) tryGetJSON(ctx context.Context, url string, target interface{}) (bool, error) {
+	logf("GET %s", url)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return false, fmt.Errorf("build request for %s: %w", url, err)
+	}
+
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", "ghapm-init")
+	if r.token != "" {
+		req.Header.Set("Authorization", "Bearer "+r.token)
+	}
+
+	resp, err := r.client.Do(req)
+	if err != nil {
+		return false, fmt.Errorf("request %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		io.Copy(io.Discard, resp.Body)
+		return false, nil
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return false, fmt.Errorf("request %s: %s: %s", url, resp.Status, strings.TrimSpace(string(body)))
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(target); err != nil {
+		return false, fmt.Errorf("decode response from %s: %w", url, err)
+	}
+
+	return true, nil
 }
 
 // --- helpers -----------------------------------------------------------------
