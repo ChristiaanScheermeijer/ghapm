@@ -16,7 +16,7 @@ var (
 		Long:  "ghapm locks GitHub Actions workflows to specific commits and helps you track safe upgrades.",
 	}
 
-	version = "0.0.1"
+	version = "dev"
 )
 
 // Execute runs the root command.
