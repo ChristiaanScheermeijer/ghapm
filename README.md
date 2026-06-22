@@ -1,5 +1,6 @@
 # GitHub Actions Package Manager
 
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 ![GitHub branch check runs](https://img.shields.io/github/check-runs/christiaanscheermeijer/ghapm/main)
 ![GitHub Release](https://img.shields.io/github/v/release/christiaanscheermeijer/ghapm)
 
@@ -149,3 +150,7 @@ Flags:
 ## Development
 
 - Format code with `gofmt -w .`.
+
+## License
+
+Licensed under the Apache License 2.0. See `LICENSE`.
