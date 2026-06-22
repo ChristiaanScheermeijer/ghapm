@@ -28,9 +28,120 @@ go build .
 
 ## Commands
 
-- `ghapm init` &mdash; scan workflow files, pin floating `uses:` references to commit SHAs, and append/update the tracking comment (`# ghapm:vX`). Existing pins are preserved unless the annotation needs to be refreshed. Supports `--api` to resolve refs via the REST API instead of the `gh` CLI.
-- `ghapm check` &mdash; analyze workflow files locally and categorize each reference (floating, dynamic, tracked, missing annotation, etc.). Groups identical issues with colorized output and supports `--json` for machine-readable reports. (Remote release validation is planned in a future version.)
-- `ghapm upgrade [--major]` &mdash; move pinned actions to the newest safe release. Respects the tracked major line, updates the annotation, and shows `(old -> new)` version ranges. Add `--major` to allow bumping to the next safe major, `--dry-run` to preview, `--safety-window` to override the default 14 days, `--api` to use the REST API instead of `gh`, and `--verbose` to log GitHub requests.
+### GitHub API strategy (important)
+
+By default, ghapm uses the `gh` CLI for GitHub requests. This is intentional:
+
+- it reuses your `gh auth` session,
+- it avoids low unauthenticated API quotas,
+- and it helps prevent rate-limit issues when processing many actions or tags.
+
+You can force direct REST requests with `--api` (for `init` and `upgrade`). When using `--api`, set `GITHUB_TOKEN` to avoid tighter anonymous limits.
+
+### `ghapm init`
+
+Initialize (or normalize) workflow action pins.
+
+What it does:
+
+- scans workflow files (default: `.github/workflows`),
+- converts floating refs such as `@v4` to commit SHAs,
+- appends or updates tracking comments: `# ghapm:v<major>`,
+- keeps already pinned SHAs and refreshes annotations when needed.
+
+Common usage:
+
+```bash
+# Pin everything in .github/workflows
+ghapm init
+
+# Preview only
+ghapm init --dry-run
+
+# Output JSON for scripting/CI
+ghapm init --json
+
+# Use REST API directly instead of gh CLI
+ghapm init --api
+```
+
+Flags:
+
+- `--workflows <dir>`: workflow directory to scan (default `.github/workflows`)
+- `--dry-run`: show changes without writing files
+- `--json`: emit machine-readable output
+- `--api`: use GitHub REST API instead of `gh` CLI
+
+### `ghapm check`
+
+Inspect workflows and report action-reference health.
+
+What it does:
+
+- classifies each `uses:` entry (tracked, floating, dynamic, missing/invalid annotation, ignored),
+- groups identical issues in text output for quick review,
+- supports JSON output for automation.
+
+`check` is currently a local analysis step; it does not query remote releases yet.
+
+Common usage:
+
+```bash
+# Human-readable report
+ghapm check
+
+# CI-friendly JSON
+ghapm check --json
+
+# Scan a custom directory
+ghapm check --workflows .github/workflows
+```
+
+Flags:
+
+- `--workflows <dir>`: workflow directory to scan
+- `--json`: emit machine-readable output
+
+### `ghapm upgrade`
+
+Move pinned actions to the newest safe release.
+
+What it does:
+
+- follows the major line tracked by `# ghapm:v<major>`,
+- upgrades SHAs to newer eligible releases,
+- enforces a safety window (default: 14 days),
+- updates the SHA and tracking comment together when needed.
+
+Common usage:
+
+```bash
+# Upgrade within tracked major versions
+ghapm upgrade
+
+# Preview changes
+ghapm upgrade --dry-run
+
+# Allow major-version bumps
+ghapm upgrade --major
+
+# Change or disable safety window
+ghapm upgrade --safety-window 21
+ghapm upgrade --safety-window 0
+
+# JSON + verbose logs
+ghapm upgrade --json --verbose
+```
+
+Flags:
+
+- `--major`: allow upgrades to the next major line
+- `--workflows <dir>`: workflow directory to scan
+- `--dry-run`: show changes without writing files
+- `--json`: emit machine-readable output
+- `--safety-window <days>`: minimum release age before upgrades (default `14`, set `0` to disable)
+- `--api`: use GitHub REST API instead of `gh` CLI
+- `--verbose` / `-v`: print client/cache request details to stderr
 
 ## Development
 
