@@ -312,6 +312,40 @@ func TestTransformInitLine_SafetyWindowNoEligibleRelease(t *testing.T) {
 	}
 }
 
+func TestTransformInitLine_SubpathLatestUsesSubpathTags(t *testing.T) {
+	sha := "dddddddddddddddddddddddddddddddddddddddd"
+
+	client := newMockClient()
+	client.AddResolve("anomalyco", "opencode", "latest", sha)
+	client.AddTags("anomalyco", "opencode", []githubclient.Tag{
+		{Name: "cli-v2.4.0", CommitSHA: sha},
+		{Name: "github-v1.2.25", CommitSHA: sha},
+	})
+	resolver := &initResolver{client: client}
+
+	line := "      uses: anomalyco/opencode/github@latest"
+	newLine, change, changed, err := transformInitLine(context.Background(), resolver, "test.yml", line, 1, 0)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !changed {
+		t.Fatal("expected line to be changed")
+	}
+	if change == nil {
+		t.Fatal("expected change record")
+	}
+	if change.Status != "pinned" {
+		t.Fatalf("status = %q, want %q", change.Status, "pinned")
+	}
+	if change.TrackingMajor == nil || *change.TrackingMajor != 1 {
+		t.Fatalf("tracking major = %v, want 1", change.TrackingMajor)
+	}
+	if !strings.Contains(newLine, "# ghapm:v1") {
+		t.Fatalf("expected ghapm:v1 annotation, got %q", newLine)
+	}
+}
+
 // --- Integration Tests for check command ---
 
 func TestParseWorkflowFile_FloatingRefs(t *testing.T) {

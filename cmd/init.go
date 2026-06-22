@@ -267,14 +267,14 @@ func transformInitLine(ctx context.Context, resolver *initResolver, workflow, li
 		}
 
 		// Try to find tags pointing to this commit to determine major version
-		major, ok = detectMajorVersionFromCommit(ctx, resolver, owner, repo, sha)
+		major, ok = detectMajorVersionFromCommit(ctx, resolver, actionMatch[1], owner, repo, sha)
 		if !ok {
 			change.Status = "skipped"
 			change.Message = fmt.Sprintf("Cannot determine major version from ref %q", change.OriginalRef)
 			return line, &change, false, nil
 		}
 
-		safeSHA, safeReason, err := enforceInitSafety(ctx, resolver, owner, repo, major, sha, safetyWindowDays)
+		safeSHA, safeReason, err := enforceInitSafety(ctx, resolver, actionMatch[1], owner, repo, major, sha, safetyWindowDays)
 		if err != nil {
 			change.Status = "error"
 			change.Message = err.Error()
@@ -315,7 +315,7 @@ func transformInitLine(ctx context.Context, resolver *initResolver, workflow, li
 	}
 
 
-	safeSHA, safeReason, err := enforceInitSafety(ctx, resolver, owner, repo, major, sha, safetyWindowDays)
+	safeSHA, safeReason, err := enforceInitSafety(ctx, resolver, actionMatch[1], owner, repo, major, sha, safetyWindowDays)
 	if err != nil {
 		change.Status = "error"
 		change.Message = err.Error()
@@ -371,7 +371,7 @@ func detectMajorVersion(ref string) (int, bool) {
 	return 0, false
 }
 
-func detectMajorVersionFromCommit(ctx context.Context, resolver *initResolver, owner, repo, sha string) (int, bool) {
+func detectMajorVersionFromCommit(ctx context.Context, resolver *initResolver, actionPath, owner, repo, sha string) (int, bool) {
 	tags, err := resolver.ListTags(ctx, owner, repo)
 	if err != nil {
 		return 0, false
@@ -382,7 +382,11 @@ func detectMajorVersionFromCommit(ctx context.Context, resolver *initResolver, o
 
 	for _, tag := range tags {
 		if tag.CommitSHA == sha {
-			if major, ok := detectMajorVersion(tag.Name); ok {
+			normalizedTag, ok := normalizeActionTagName(actionPath, tag.Name)
+			if !ok {
+				continue
+			}
+			if major, ok := detectMajorVersion(normalizedTag); ok {
 				if major > highestMajor || !found {
 					highestMajor = major
 					found = true
@@ -394,7 +398,7 @@ func detectMajorVersionFromCommit(ctx context.Context, resolver *initResolver, o
 	return highestMajor, found
 }
 
-func enforceInitSafety(ctx context.Context, resolver *initResolver, owner, repo string, major int, resolvedSHA string, safetyWindowDays int) (string, string, error) {
+func enforceInitSafety(ctx context.Context, resolver *initResolver, actionPath, owner, repo string, major int, resolvedSHA string, safetyWindowDays int) (string, string, error) {
 	if safetyWindowDays <= 0 {
 		return resolvedSHA, "", nil
 	}
@@ -414,7 +418,12 @@ func enforceInitSafety(ctx context.Context, resolver *initResolver, owner, repo 
 	}
 
 	for _, tag := range tags {
-		tagMajor, tagOK := detectMajorVersion(tag.Name)
+		normalizedTag, ok := normalizeActionTagName(actionPath, tag.Name)
+		if !ok {
+			continue
+		}
+
+		tagMajor, tagOK := detectMajorVersion(normalizedTag)
 		if !tagOK || tagMajor != major {
 			continue
 		}
@@ -434,6 +443,24 @@ func enforceInitSafety(ctx context.Context, resolver *initResolver, owner, repo 
 		return "", fmt.Sprintf("No eligible release in major v%d satisfies the %d-day safety window (resolved ref date %s)", major, safetyWindowDays, when.Format(time.RFC3339)), nil
 	}
 	return "", fmt.Sprintf("No eligible release in major v%d satisfies the %d-day safety window", major, safetyWindowDays), nil
+}
+
+func normalizeActionTagName(actionPath, tagName string) (string, bool) {
+	parts := strings.Split(actionPath, "/")
+	if len(parts) <= 2 {
+		return tagName, true
+	}
+
+	subpath := strings.Join(parts[2:], "/")
+	prefixes := []string{subpath + "-", strings.ReplaceAll(subpath, "/", "-") + "-"}
+
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(tagName, prefix) {
+			return strings.TrimPrefix(tagName, prefix), true
+		}
+	}
+
+	return "", false
 }
 
 func mergeTrackingComment(existing string, major int) string {
