@@ -1,5 +1,8 @@
 # GitHub Actions Package Manager
 
+![GitHub branch check runs](https://img.shields.io/github/check-runs/christiaanscheermeijer/ghapm/main)
+![GitHub Release](https://img.shields.io/github/v/release/christiaanscheermeijer/ghapm)
+
 GitHub Actions Package Manager (ghapm) keeps your workflow files reproducible by pinning every `uses:` reference to an exact commit while still tracking upstream releases, highlighting safe upgrades, and honoring a configurable safety window.
 
 ```diff
