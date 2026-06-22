@@ -2,8 +2,10 @@ package githubclient
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -190,3 +192,100 @@ func (m *mockClient) ResolveRef(ctx context.Context, owner, repo, ref string) (s
 }
 
 var _ Client = (*mockClient)(nil)
+
+// --- resolveGitObjectToCommit ---
+
+func TestResolveGitObjectToCommit(t *testing.T) {
+	t.Run("returns commit as-is", func(t *testing.T) {
+		sha, err := resolveGitObjectToCommit("abc123", "commit", func(string) (string, string, error) {
+			t.Fatal("resolveTag should not be called for commit objects")
+			return "", "", nil
+		})
+		if err != nil {
+			t.Fatalf("resolveGitObjectToCommit() error = %v", err)
+		}
+		if sha != "abc123" {
+			t.Fatalf("resolveGitObjectToCommit() = %q, want %q", sha, "abc123")
+		}
+	})
+
+	t.Run("treats empty type as commit", func(t *testing.T) {
+		sha, err := resolveGitObjectToCommit("def456", "", func(string) (string, string, error) {
+			t.Fatal("resolveTag should not be called when type is empty")
+			return "", "", nil
+		})
+		if err != nil {
+			t.Fatalf("resolveGitObjectToCommit() error = %v", err)
+		}
+		if sha != "def456" {
+			t.Fatalf("resolveGitObjectToCommit() = %q, want %q", sha, "def456")
+		}
+	})
+
+	t.Run("dereferences annotated tag to commit", func(t *testing.T) {
+		sha, err := resolveGitObjectToCommit("tag-sha", "tag", func(tagSHA string) (string, string, error) {
+			if tagSHA != "tag-sha" {
+				t.Fatalf("resolveTag called with %q, want %q", tagSHA, "tag-sha")
+			}
+			return "commit-sha", "commit", nil
+		})
+		if err != nil {
+			t.Fatalf("resolveGitObjectToCommit() error = %v", err)
+		}
+		if sha != "commit-sha" {
+			t.Fatalf("resolveGitObjectToCommit() = %q, want %q", sha, "commit-sha")
+		}
+	})
+
+	t.Run("supports nested tags", func(t *testing.T) {
+		calls := 0
+		sha, err := resolveGitObjectToCommit("tag-1", "tag", func(tagSHA string) (string, string, error) {
+			calls++
+			switch tagSHA {
+			case "tag-1":
+				return "tag-2", "tag", nil
+			case "tag-2":
+				return "commit-1", "commit", nil
+			default:
+				return "", "", fmt.Errorf("unexpected tag sha %q", tagSHA)
+			}
+		})
+		if err != nil {
+			t.Fatalf("resolveGitObjectToCommit() error = %v", err)
+		}
+		if sha != "commit-1" {
+			t.Fatalf("resolveGitObjectToCommit() = %q, want %q", sha, "commit-1")
+		}
+		if calls != 2 {
+			t.Fatalf("resolveTag call count = %d, want %d", calls, 2)
+		}
+	})
+
+	t.Run("errors on unsupported object type", func(t *testing.T) {
+		_, err := resolveGitObjectToCommit("blob-sha", "blob", func(string) (string, string, error) {
+			return "", "", nil
+		})
+		if err == nil || !strings.Contains(err.Error(), "unsupported git object type") {
+			t.Fatalf("expected unsupported type error, got %v", err)
+		}
+	})
+
+	t.Run("propagates tag resolution error", func(t *testing.T) {
+		wantErr := errors.New("network failed")
+		_, err := resolveGitObjectToCommit("tag-sha", "tag", func(string) (string, string, error) {
+			return "", "", wantErr
+		})
+		if !errors.Is(err, wantErr) {
+			t.Fatalf("expected wrapped error %v, got %v", wantErr, err)
+		}
+	})
+
+	t.Run("errors when dereference depth exceeded", func(t *testing.T) {
+		_, err := resolveGitObjectToCommit("tag-0", "tag", func(tagSHA string) (string, string, error) {
+			return tagSHA + "-next", "tag", nil
+		})
+		if err == nil || !strings.Contains(err.Error(), "exceeded maximum tag dereference depth") {
+			t.Fatalf("expected depth error, got %v", err)
+		}
+	})
+}

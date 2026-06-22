@@ -294,33 +294,82 @@ func (cli *cliClient) ResolveRef(ctx context.Context, owner, repo, ref string) (
 	}
 
 	for _, endpoint := range attempts {
-		sha, found, err := cli.resolveRefEndpoint(ctx, endpoint)
+		sha, objectType, found, err := cli.resolveRefEndpoint(ctx, endpoint)
 		if err != nil {
 			return "", err
 		}
 		if found {
-			return strings.ToLower(sha), nil
+			commitSHA, err := resolveGitObjectToCommit(sha, objectType, func(tagSHA string) (string, string, error) {
+				return cli.resolveTagObject(ctx, owner, repo, tagSHA)
+			})
+			if err != nil {
+				return "", err
+			}
+			return strings.ToLower(commitSHA), nil
 		}
 	}
 
 	return "", fmt.Errorf("ref %q not found", ref)
 }
 
-func (cli *cliClient) resolveRefEndpoint(ctx context.Context, endpoint string) (string, bool, error) {
+func (cli *cliClient) resolveRefEndpoint(ctx context.Context, endpoint string) (string, string, bool, error) {
 	logf("gh api: %s", endpoint)
-	cmd := exec.CommandContext(ctx, "gh", "api", endpoint, "--jq", ".object.sha")
+	cmd := exec.CommandContext(ctx, "gh", "api", endpoint)
 	output, err := cmd.CombinedOutput()
 	result := strings.TrimSpace(string(output))
 	if err != nil {
 		if strings.Contains(result, "404") {
-			return "", false, nil
+			return "", "", false, nil
 		}
-		return "", false, fmt.Errorf("gh api %s: %v: %s", endpoint, err, result)
+		return "", "", false, fmt.Errorf("gh api %s: %v: %s", endpoint, err, result)
 	}
 	if result == "" {
-		return "", false, nil
+		return "", "", false, nil
 	}
-	return result, true, nil
+
+	var payload struct {
+		Object struct {
+			SHA  string `json:"sha"`
+			Type string `json:"type"`
+		} `json:"object"`
+	}
+
+	if err := json.Unmarshal(output, &payload); err != nil {
+		return "", "", false, fmt.Errorf("parse gh output for %s: %w", endpoint, err)
+	}
+
+	if strings.TrimSpace(payload.Object.SHA) == "" {
+		return "", "", false, nil
+	}
+
+	return payload.Object.SHA, payload.Object.Type, true, nil
+}
+
+func (cli *cliClient) resolveTagObject(ctx context.Context, owner, repo, tagSHA string) (string, string, error) {
+	endpoint := fmt.Sprintf("repos/%s/%s/git/tags/%s", owner, repo, tagSHA)
+	logf("gh api: %s", endpoint)
+	cmd := exec.CommandContext(ctx, "gh", "api", endpoint)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", "", fmt.Errorf("gh api %s: %v: %s", endpoint, err, strings.TrimSpace(string(output)))
+	}
+
+	var payload struct {
+		Object struct {
+			SHA  string `json:"sha"`
+			Type string `json:"type"`
+		} `json:"object"`
+	}
+
+	if err := json.Unmarshal(output, &payload); err != nil {
+		return "", "", fmt.Errorf("parse gh output for %s: %w", endpoint, err)
+	}
+
+	if strings.TrimSpace(payload.Object.SHA) == "" {
+		return "", "", fmt.Errorf("tag object %q has empty target", tagSHA)
+	}
+
+	return payload.Object.SHA, payload.Object.Type, nil
 }
 
 // --- REST implementation ------------------------------------------------------
@@ -414,7 +463,8 @@ func (r *restClient) ResolveRef(ctx context.Context, owner, repo, ref string) (s
 	for _, url := range attempts {
 		var payload struct {
 			Object struct {
-				SHA string `json:"sha"`
+				SHA  string `json:"sha"`
+				Type string `json:"type"`
 			} `json:"object"`
 		}
 		ok, err := r.tryGetJSON(ctx, url, &payload)
@@ -422,11 +472,77 @@ func (r *restClient) ResolveRef(ctx context.Context, owner, repo, ref string) (s
 			return "", err
 		}
 		if ok && payload.Object.SHA != "" {
-			return strings.ToLower(payload.Object.SHA), nil
+			commitSHA, err := resolveGitObjectToCommit(payload.Object.SHA, payload.Object.Type, func(tagSHA string) (string, string, error) {
+				return r.resolveTagObject(ctx, owner, repo, tagSHA)
+			})
+			if err != nil {
+				return "", err
+			}
+			return strings.ToLower(commitSHA), nil
 		}
 	}
 
 	return "", fmt.Errorf("ref %q not found", ref)
+}
+
+func (r *restClient) resolveTagObject(ctx context.Context, owner, repo, tagSHA string) (string, string, error) {
+	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/%s/git/tags/%s", owner, repo, tagSHA)
+	logf("GET %s", endpoint)
+
+	var payload struct {
+		Object struct {
+			SHA  string `json:"sha"`
+			Type string `json:"type"`
+		} `json:"object"`
+	}
+
+	if err := r.getJSON(ctx, endpoint, &payload); err != nil {
+		return "", "", err
+	}
+
+	if strings.TrimSpace(payload.Object.SHA) == "" {
+		return "", "", fmt.Errorf("tag object %q has empty target", tagSHA)
+	}
+
+	return payload.Object.SHA, payload.Object.Type, nil
+}
+
+func resolveGitObjectToCommit(initialSHA, initialType string, resolveTag func(tagSHA string) (string, string, error)) (string, error) {
+	sha := strings.TrimSpace(initialSHA)
+	if sha == "" {
+		return "", fmt.Errorf("empty git object sha")
+	}
+
+	objectType := strings.ToLower(strings.TrimSpace(initialType))
+	if objectType == "" || objectType == "commit" {
+		return sha, nil
+	}
+
+	for depth := 0; depth < 5; depth++ {
+		if objectType != "tag" {
+			return "", fmt.Errorf("unsupported git object type %q", objectType)
+		}
+
+		nextSHA, nextType, err := resolveTag(sha)
+		if err != nil {
+			return "", err
+		}
+
+		nextSHA = strings.TrimSpace(nextSHA)
+		if nextSHA == "" {
+			return "", fmt.Errorf("empty object sha while dereferencing tag %q", sha)
+		}
+
+		nextType = strings.ToLower(strings.TrimSpace(nextType))
+		if nextType == "" || nextType == "commit" {
+			return nextSHA, nil
+		}
+
+		sha = nextSHA
+		objectType = nextType
+	}
+
+	return "", fmt.Errorf("exceeded maximum tag dereference depth")
 }
 
 func (r *restClient) getJSON(ctx context.Context, url string, target interface{}) error {
