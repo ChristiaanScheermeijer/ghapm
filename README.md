@@ -11,6 +11,10 @@ GitHub Actions Package Manager (ghapm) keeps your workflow files reproducible by
 + uses: actions/checkout@<hash> # ghapm:v4
 ```
 
+> [!WARNING]
+> ghapm is a work in progress. Behavior, command flags, and output formats may change between releases.
+
+
 ## Installation
 
 ### GitHub Releases
