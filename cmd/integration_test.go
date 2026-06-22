@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -98,7 +99,7 @@ func TestTransformInitLine_AlreadyPinned(t *testing.T) {
 	resolver := &initResolver{client: client}
 
 	line := "      uses: actions/checkout@1234567890abcdef1234567890abcdef12345678 # ghapm:v4"
-	newLine, change, changed, err := transformInitLine(context.Background(), resolver, "test.yml", line, 1)
+	newLine, change, changed, err := transformInitLine(context.Background(), resolver, "test.yml", line, 1, 14)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -125,7 +126,7 @@ func TestTransformInitLine_AlreadyPinnedNoComment(t *testing.T) {
 	resolver := &initResolver{client: client}
 
 	line := "      uses: actions/checkout@1234567890abcdef1234567890abcdef12345678"
-	_, change, changed, err := transformInitLine(context.Background(), resolver, "test.yml", line, 1)
+	_, change, changed, err := transformInitLine(context.Background(), resolver, "test.yml", line, 1, 14)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -149,7 +150,7 @@ func TestTransformInitLine_SkippedDynamic(t *testing.T) {
 	resolver := &initResolver{client: client}
 
 	line := "      uses: actions/checkout@${{ github.ref }}"
-	_, change, changed, err := transformInitLine(context.Background(), resolver, "test.yml", line, 1)
+	_, change, changed, err := transformInitLine(context.Background(), resolver, "test.yml", line, 1, 14)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -172,7 +173,7 @@ func TestTransformInitLine_SkippedNoMajorVersion(t *testing.T) {
 	resolver := &initResolver{client: client}
 
 	line := "      uses: actions/checkout@main"
-	_, change, changed, err := transformInitLine(context.Background(), resolver, "test.yml", line, 1)
+	_, change, changed, err := transformInitLine(context.Background(), resolver, "test.yml", line, 1, 14)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -194,7 +195,7 @@ func TestTransformInitLine_ErrorRefNotFound(t *testing.T) {
 	resolver := &initResolver{client: client}
 
 	line := "      uses: actions/checkout@v99"
-	_, _, _, err := transformInitLine(context.Background(), resolver, "test.yml", line, 1)
+	_, _, _, err := transformInitLine(context.Background(), resolver, "test.yml", line, 1, 14)
 
 	if err == nil {
 		t.Fatal("expected error for non-existent ref")
@@ -206,7 +207,7 @@ func TestTransformInitLine_NotUsesLine(t *testing.T) {
 	resolver := &initResolver{client: client}
 
 	line := "      name: Build"
-	newLine, change, changed, err := transformInitLine(context.Background(), resolver, "test.yml", line, 1)
+	newLine, change, changed, err := transformInitLine(context.Background(), resolver, "test.yml", line, 1, 14)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -227,7 +228,7 @@ func TestTransformInitLine_LocalAction(t *testing.T) {
 	resolver := &initResolver{client: client}
 
 	line := "      uses: ./local-action"
-	newLine, change, changed, err := transformInitLine(context.Background(), resolver, "test.yml", line, 1)
+	newLine, change, changed, err := transformInitLine(context.Background(), resolver, "test.yml", line, 1, 14)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -240,6 +241,74 @@ func TestTransformInitLine_LocalAction(t *testing.T) {
 	}
 	if change != nil {
 		t.Error("expected nil change for local action")
+	}
+}
+
+func TestTransformInitLine_SafetyWindowFallsBackToOlderTag(t *testing.T) {
+	now := time.Now()
+	newSHA := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	oldSHA := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+	client := newMockClient()
+	client.AddResolve("actions", "checkout", "v4", newSHA)
+	client.AddTags("actions", "checkout", []githubclient.Tag{
+		{Name: "v4.2.0", CommitSHA: newSHA},
+		{Name: "v4.1.0", CommitSHA: oldSHA},
+	})
+	client.AddCommit("actions", "checkout", newSHA, now.Add(-2*24*time.Hour), true)
+	client.AddCommit("actions", "checkout", oldSHA, now.Add(-30*24*time.Hour), true)
+	resolver := &initResolver{client: client}
+
+	line := "      uses: actions/checkout@v4"
+	newLine, change, changed, err := transformInitLine(context.Background(), resolver, "test.yml", line, 1, 14)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !changed {
+		t.Fatal("expected line to be changed")
+	}
+	if change == nil {
+		t.Fatal("expected change record")
+	}
+	if change.Status != "pinned" {
+		t.Fatalf("status = %q, want %q", change.Status, "pinned")
+	}
+	if change.NewRef != oldSHA {
+		t.Fatalf("new ref = %q, want %q", change.NewRef, oldSHA)
+	}
+	if !strings.Contains(newLine, "@"+oldSHA) {
+		t.Fatalf("expected line to include old safe SHA, got %q", newLine)
+	}
+}
+
+func TestTransformInitLine_SafetyWindowNoEligibleRelease(t *testing.T) {
+	now := time.Now()
+	newSHA := "cccccccccccccccccccccccccccccccccccccccc"
+
+	client := newMockClient()
+	client.AddResolve("actions", "checkout", "v4", newSHA)
+	client.AddTags("actions", "checkout", []githubclient.Tag{{Name: "v4.2.0", CommitSHA: newSHA}})
+	client.AddCommit("actions", "checkout", newSHA, now.Add(-1*24*time.Hour), true)
+	resolver := &initResolver{client: client}
+
+	line := "      uses: actions/checkout@v4"
+	newLine, change, changed, err := transformInitLine(context.Background(), resolver, "test.yml", line, 1, 14)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if changed {
+		t.Fatal("expected no line change")
+	}
+	if newLine != line {
+		t.Fatalf("line changed unexpectedly: %q", newLine)
+	}
+	if change == nil {
+		t.Fatal("expected change record")
+	}
+	if change.Status != "skipped" {
+		t.Fatalf("status = %q, want %q", change.Status, "skipped")
 	}
 }
 

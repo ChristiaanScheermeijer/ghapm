@@ -78,6 +78,7 @@ Flags:
 - `--workflows <dir>`: workflow directory to scan (default `.github/workflows`)
 - `--dry-run`: show changes without writing files
 - `--json`: emit machine-readable output
+- `--safety-window <days>`: minimum release age before pinning (default `14`, set `0` to disable)
 - `--api`: use GitHub REST API instead of `gh` CLI
 
 ### `ghapm check`

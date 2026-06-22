@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	githubclient "github.com/christiaanscheermeijer/ghapm/internal/githubclient"
 	"github.com/spf13/cobra"
@@ -20,13 +21,14 @@ var (
 	initDryRun      bool
 	initOutputJSON  bool
 	initUseAPI      bool
+	initSafetyWindow int
 
 	initCmd = &cobra.Command{
 		Use:   "init",
 		Short: "Pin all workflow actions to specific commits",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			report, err := runInit(cmd.Context(), initWorkflowDir, initDryRun, initUseAPI)
+			report, err := runInit(cmd.Context(), initWorkflowDir, initDryRun, initUseAPI, initSafetyWindow)
 			if err != nil {
 				return err
 			}
@@ -94,7 +96,11 @@ func (r *initResolver) ListTags(ctx context.Context, owner, repo string) ([]gith
 	return r.client.ListTags(ctx, owner, repo)
 }
 
-func runInit(ctx context.Context, workflowDir string, dryRun bool, useAPI bool) (initReport, error) {
+func (r *initResolver) CommitDate(ctx context.Context, owner, repo, sha string) (time.Time, bool, error) {
+	return r.client.CommitDate(ctx, owner, repo, sha)
+}
+
+func runInit(ctx context.Context, workflowDir string, dryRun bool, useAPI bool, safetyWindowDays int) (initReport, error) {
 	files, err := discoverWorkflowFiles(workflowDir)
 	if err != nil {
 		if errors.Is(err, errWorkflowDirMissing) {
@@ -113,7 +119,7 @@ func runInit(ctx context.Context, workflowDir string, dryRun bool, useAPI bool) 
 	resolver := &initResolver{client: newGitHubClient(useAPI)}
 
 	for _, file := range files {
-		fileChanges, stats, fileChanged, err := processInitWorkflowFile(ctx, file, resolver, dryRun)
+		fileChanges, stats, fileChanged, err := processInitWorkflowFile(ctx, file, resolver, dryRun, safetyWindowDays)
 		report.Changes = append(report.Changes, fileChanges...)
 		report.Summary.ActionCount += stats.Actions
 		report.Summary.PinnedCount += stats.Pinned
@@ -133,7 +139,7 @@ func runInit(ctx context.Context, workflowDir string, dryRun bool, useAPI bool) 
 	return report, nil
 }
 
-func processInitWorkflowFile(ctx context.Context, path string, resolver *initResolver, dryRun bool) ([]initChange, initFileStats, bool, error) {
+func processInitWorkflowFile(ctx context.Context, path string, resolver *initResolver, dryRun bool, safetyWindowDays int) ([]initChange, initFileStats, bool, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, initFileStats{}, false, fmt.Errorf("read workflow %q: %w", path, err)
@@ -152,7 +158,7 @@ func processInitWorkflowFile(ctx context.Context, path string, resolver *initRes
 	for idx, line := range lines {
 		lineNumber := idx + 1
 
-		newLine, change, lineChanged, err := transformInitLine(ctx, resolver, workflowPath, line, lineNumber)
+		newLine, change, lineChanged, err := transformInitLine(ctx, resolver, workflowPath, line, lineNumber, safetyWindowDays)
 		if change != nil {
 			stats.Actions++
 			switch change.Status {
@@ -192,7 +198,7 @@ func processInitWorkflowFile(ctx context.Context, path string, resolver *initRes
 	return changes, stats, fileChange, nil
 }
 
-func transformInitLine(ctx context.Context, resolver *initResolver, workflow, line string, lineNumber int) (string, *initChange, bool, error) {
+func transformInitLine(ctx context.Context, resolver *initResolver, workflow, line string, lineNumber int, safetyWindowDays int) (string, *initChange, bool, error) {
 	match := initUsesLineExpr.FindStringSubmatch(line)
 	if match == nil {
 		return line, nil, false, nil
@@ -268,13 +274,25 @@ func transformInitLine(ctx context.Context, resolver *initResolver, workflow, li
 			return line, &change, false, nil
 		}
 
+		safeSHA, safeReason, err := enforceInitSafety(ctx, resolver, owner, repo, major, sha, safetyWindowDays)
+		if err != nil {
+			change.Status = "error"
+			change.Message = err.Error()
+			return line, &change, false, err
+		}
+		if safeSHA == "" {
+			change.Status = "skipped"
+			change.Message = safeReason
+			return line, &change, false, nil
+		}
+
 		// Successfully resolved and found major version
 		change.Status = "pinned"
-		change.NewRef = sha
+		change.NewRef = safeSHA
 		change.TrackingMajor = &major
-		change.Message = fmt.Sprintf("Pinned to commit %s", shortCommit(sha))
+		change.Message = fmt.Sprintf("Pinned to commit %s", shortCommit(safeSHA))
 
-		newUses := actionMatch[1] + "@" + sha
+		newUses := actionMatch[1] + "@" + safeSHA
 		comment := mergeTrackingComment(commentValue, major)
 		spacing := commentSpacing
 		if comment != "" && spacing == "" {
@@ -296,12 +314,25 @@ func transformInitLine(ctx context.Context, resolver *initResolver, workflow, li
 		return line, &change, false, err
 	}
 
-	change.Status = "pinned"
-	change.NewRef = sha
-	change.TrackingMajor = &major
-	change.Message = fmt.Sprintf("Pinned to commit %s", shortCommit(sha))
 
-	newUses := actionMatch[1] + "@" + sha
+	safeSHA, safeReason, err := enforceInitSafety(ctx, resolver, owner, repo, major, sha, safetyWindowDays)
+	if err != nil {
+		change.Status = "error"
+		change.Message = err.Error()
+		return line, &change, false, err
+	}
+	if safeSHA == "" {
+		change.Status = "skipped"
+		change.Message = safeReason
+		return line, &change, false, nil
+	}
+
+	change.Status = "pinned"
+	change.NewRef = safeSHA
+	change.TrackingMajor = &major
+	change.Message = fmt.Sprintf("Pinned to commit %s", shortCommit(safeSHA))
+
+	newUses := actionMatch[1] + "@" + safeSHA
 	comment := mergeTrackingComment(commentValue, major)
 	spacing := commentSpacing
 	if comment != "" && spacing == "" {
@@ -361,6 +392,48 @@ func detectMajorVersionFromCommit(ctx context.Context, resolver *initResolver, o
 	}
 
 	return highestMajor, found
+}
+
+func enforceInitSafety(ctx context.Context, resolver *initResolver, owner, repo string, major int, resolvedSHA string, safetyWindowDays int) (string, string, error) {
+	if safetyWindowDays <= 0 {
+		return resolvedSHA, "", nil
+	}
+
+	cutoff := time.Now().Add(-time.Duration(safetyWindowDays) * 24 * time.Hour)
+	when, ok, err := resolver.CommitDate(ctx, owner, repo, resolvedSHA)
+	if err != nil {
+		return "", "", err
+	}
+	if ok && !when.After(cutoff) {
+		return resolvedSHA, "", nil
+	}
+
+	tags, err := resolver.ListTags(ctx, owner, repo)
+	if err != nil {
+		return "", "", err
+	}
+
+	for _, tag := range tags {
+		tagMajor, tagOK := detectMajorVersion(tag.Name)
+		if !tagOK || tagMajor != major {
+			continue
+		}
+
+		tagWhen, tagWhenOK, err := resolver.CommitDate(ctx, owner, repo, tag.CommitSHA)
+		if err != nil {
+			return "", "", err
+		}
+		if !tagWhenOK || tagWhen.After(cutoff) {
+			continue
+		}
+
+		return tag.CommitSHA, "", nil
+	}
+
+	if ok {
+		return "", fmt.Sprintf("No eligible release in major v%d satisfies the %d-day safety window (resolved ref date %s)", major, safetyWindowDays, when.Format(time.RFC3339)), nil
+	}
+	return "", fmt.Sprintf("No eligible release in major v%d satisfies the %d-day safety window", major, safetyWindowDays), nil
 }
 
 func mergeTrackingComment(existing string, major int) string {
@@ -493,5 +566,6 @@ func init() {
 	initCmd.Flags().BoolVar(&initDryRun, "dry-run", false, "Preview changes without modifying files")
 	initCmd.Flags().BoolVar(&initOutputJSON, "json", false, "Emit machine-readable JSON output")
 	initCmd.Flags().BoolVar(&initUseAPI, "api", false, "Use GitHub REST API instead of the gh CLI")
+	initCmd.Flags().IntVar(&initSafetyWindow, "safety-window", 14, "Minimum release age in days before pinning is allowed (set 0 to disable)")
 	rootCmd.AddCommand(initCmd)
 }
