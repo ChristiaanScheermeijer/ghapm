@@ -19,6 +19,8 @@ var (
 	checkWorkflowDir string
 	checkOutputJSON  bool
 
+	constCheckExitFindings = 2
+
 	checkCmd = &cobra.Command{
 		Use:   "check",
 		Short: "Report available updates for pinned actions",
@@ -30,14 +32,34 @@ var (
 			}
 
 			if checkOutputJSON {
-				return writeCheckReportJSON(cmd, report)
+				if err := writeCheckReportJSON(cmd, report); err != nil {
+					return err
+				}
+			} else {
+				writeCheckReportText(cmd, report, checkWorkflowDir)
 			}
 
-			writeCheckReportText(cmd, report, checkWorkflowDir)
+			if code := checkExitCode(report); code != 0 {
+				return newExitCodeError(code, "")
+			}
+
 			return nil
 		},
 	}
 )
+
+func checkExitCode(report checkReport) int {
+	if report.WorkflowDirMissing {
+		return 0
+	}
+
+	summary := report.Summary
+	if summary.FloatingCount > 0 || summary.DynamicCount > 0 || summary.MissingCount > 0 || summary.InvalidCount > 0 {
+		return constCheckExitFindings
+	}
+
+	return 0
+}
 
 type checkRecord struct {
 	Workflow      string `json:"workflow"`

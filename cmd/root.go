@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -25,8 +26,17 @@ func Execute() {
 	rootCmd.SilenceUsage = true
 
 	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		exitCode := 1
+		var coded interface{ ExitCode() int }
+		if errors.As(err, &coded) {
+			exitCode = coded.ExitCode()
+		}
+
+		if err.Error() != "" {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		}
+
+		os.Exit(exitCode)
 	}
 }
 

@@ -285,6 +285,67 @@ func TestActionRefExpr(t *testing.T) {
 	}
 }
 
+func TestCheckExitCode(t *testing.T) {
+	tests := []struct {
+		name   string
+		report checkReport
+		want   int
+	}{
+		{
+			name: "no findings",
+			report: checkReport{
+				Summary: checkSummary{TrackedCount: 2},
+			},
+			want: 0,
+		},
+		{
+			name: "floating refs",
+			report: checkReport{
+				Summary: checkSummary{FloatingCount: 1},
+			},
+			want: constCheckExitFindings,
+		},
+		{
+			name: "dynamic refs",
+			report: checkReport{
+				Summary: checkSummary{DynamicCount: 1},
+			},
+			want: constCheckExitFindings,
+		},
+		{
+			name: "missing tracking comment",
+			report: checkReport{
+				Summary: checkSummary{MissingCount: 1},
+			},
+			want: constCheckExitFindings,
+		},
+		{
+			name: "invalid tracking comment",
+			report: checkReport{
+				Summary: checkSummary{InvalidCount: 1},
+			},
+			want: constCheckExitFindings,
+		},
+		{
+			name: "workflow directory missing",
+			report: checkReport{
+				WorkflowDirMissing: true,
+				Summary:            checkSummary{FloatingCount: 3},
+			},
+			want: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := checkExitCode(tt.report)
+			if got != tt.want {
+				t.Errorf("checkExitCode() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestShaExpr(t *testing.T) {
 	tests := []struct {
 		input string
