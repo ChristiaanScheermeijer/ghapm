@@ -9,12 +9,21 @@ GitHub Actions Package Manager (ghapm) keeps your workflow files reproducible by
 
 ## Installation
 
-### Package Managers
+### GitHub Releases
 
-```shell
-$ npm install -g ghapm
-$ pnpm add -g ghapm
-$ yarn global add ghapm
+Download a prebuilt binary from the [GitHub Releases](https://github.com/christiaanscheermeijer/ghapm/releases) page.
+
+If you use the GitHub CLI, you can fetch the latest release assets with:
+
+```bash
+gh release download --repo christiaanscheermeijer/ghapm --pattern "*"
+```
+
+### Build from Source
+
+```bash
+go build .
+./ghapm --help
 ```
 
 ## Commands
@@ -26,10 +35,3 @@ $ yarn global add ghapm
 ## Development
 
 - Format code with `gofmt -w .`.
-
-### Build from Source
-
-```bash
-go build .
-./ghapm --help
-```
