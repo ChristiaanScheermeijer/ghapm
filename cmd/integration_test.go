@@ -625,11 +625,23 @@ func TestFindTagForCommit(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.commit, func(t *testing.T) {
-			got := findTagForCommit(tags, tt.commit)
+			got := findTagForCommit("actions/checkout", tags, tt.commit)
 			if got != tt.want {
 				t.Errorf("findTagForCommit(%q) = %q, want %q", tt.commit, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestFindTagForCommit_SubpathPrefersMatchingPrefix(t *testing.T) {
+	tags := []githubclient.Tag{
+		{Name: "v1.16.2", CommitSHA: "aaa"},
+		{Name: "github-v1.2.19", CommitSHA: "aaa"},
+	}
+
+	got := findTagForCommit("anomalyco/opencode/github", tags, "aaa")
+	if got != "github-v1.2.19" {
+		t.Fatalf("findTagForCommit() = %q, want %q", got, "github-v1.2.19")
 	}
 }
 
@@ -662,5 +674,76 @@ func TestParseTagVersion(t *testing.T) {
 				t.Errorf("parseTagVersion(%q).patch = %d, want %d", tt.name, got.patch, tt.wantPatch)
 			}
 		})
+	}
+}
+
+func TestSelectUpgradeTarget_DoesNotDowngradeUnsafeCurrent(t *testing.T) {
+	now := time.Now()
+
+	client := newMockClient()
+	client.AddCommit("actions", "checkout", "sha603", now.Add(-2*24*time.Hour), true)
+	client.AddCommit("actions", "checkout", "sha602", now.Add(-30*24*time.Hour), true)
+	client.AddCommit("actions", "checkout", "sha700", now.Add(-2*24*time.Hour), true)
+
+	resolver := &tagResolver{
+		client:           client,
+		allowMajor:       false,
+		enforceSafety:    true,
+		safetyWindowDays: 14,
+		cutoff:           now.Add(-14 * 24 * time.Hour),
+	}
+
+	tags := []githubclient.Tag{
+		{Name: "v7.0.0", CommitSHA: "sha700"},
+		{Name: "v6.0.3", CommitSHA: "sha603"},
+		{Name: "v6.0.2", CommitSHA: "sha602"},
+	}
+
+	target, state, _, _, _, err := resolver.selectUpgradeTarget(context.Background(), "actions/checkout", "actions", "checkout", tags, 6, "sha603")
+	if err != nil {
+		t.Fatalf("selectUpgradeTarget() error = %v", err)
+	}
+	if state != upgradeStateCurrent {
+		t.Fatalf("state = %v, want %v", state, upgradeStateCurrent)
+	}
+	if target != nil {
+		t.Fatalf("target should be nil when staying on current pin, got %+v", *target)
+	}
+}
+
+func TestSelectUpgradeTarget_SubpathIgnoresRootTags(t *testing.T) {
+	now := time.Now()
+
+	client := newMockClient()
+	client.AddCommit("anomalyco", "opencode", "sha119", now.Add(-30*24*time.Hour), true)
+	client.AddCommit("anomalyco", "opencode", "sha120", now.Add(-29*24*time.Hour), true)
+	client.AddCommit("anomalyco", "opencode", "sharoot", now.Add(-60*24*time.Hour), true)
+
+	resolver := &tagResolver{
+		client:           client,
+		allowMajor:       false,
+		enforceSafety:    true,
+		safetyWindowDays: 14,
+		cutoff:           now.Add(-14 * 24 * time.Hour),
+	}
+
+	tags := []githubclient.Tag{
+		{Name: "v1.16.2", CommitSHA: "sharoot"},
+		{Name: "github-v1.2.20", CommitSHA: "sha120"},
+		{Name: "github-v1.2.19", CommitSHA: "sha119"},
+	}
+
+	target, state, _, _, _, err := resolver.selectUpgradeTarget(context.Background(), "anomalyco/opencode/github", "anomalyco", "opencode", tags, 1, "sha119")
+	if err != nil {
+		t.Fatalf("selectUpgradeTarget() error = %v", err)
+	}
+	if state != upgradeStateUpgrade {
+		t.Fatalf("state = %v, want %v", state, upgradeStateUpgrade)
+	}
+	if target == nil {
+		t.Fatal("expected upgrade target")
+	}
+	if target.Name != "github-v1.2.20" {
+		t.Fatalf("target = %q, want %q", target.Name, "github-v1.2.20")
 	}
 }

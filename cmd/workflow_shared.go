@@ -50,3 +50,21 @@ func intPtr(v int) *int {
 	*p = v
 	return p
 }
+
+func normalizeActionTagName(actionPath, tagName string) (string, bool) {
+	parts := strings.Split(actionPath, "/")
+	if len(parts) <= 2 {
+		return tagName, true
+	}
+
+	subpath := strings.Join(parts[2:], "/")
+	prefixes := []string{subpath + "-", strings.ReplaceAll(subpath, "/", "-") + "-"}
+
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(tagName, prefix) {
+			return strings.TrimPrefix(tagName, prefix), true
+		}
+	}
+
+	return "", false
+}

@@ -305,7 +305,7 @@ func (r *tagResolver) transformLine(ctx context.Context, workflow, line string, 
 		return line, &change, false, err
 	}
 
-	targetTag, state, reason, majorCandidate, majorReason, err := r.selectUpgradeTarget(ctx, parts[0], parts[1], tags, trackedMajor, currentRef)
+	targetTag, state, reason, majorCandidate, majorReason, err := r.selectUpgradeTarget(ctx, actionPath, parts[0], parts[1], tags, trackedMajor, currentRef)
 	if err != nil {
 		change.Status = "error"
 		change.Message = err.Error()
@@ -347,7 +347,7 @@ func (r *tagResolver) transformLine(ctx context.Context, workflow, line string, 
 	change.TargetMajor = intPtr(ver.major)
 	change.TargetTag = targetTag.Name
 	change.TargetRef = targetTag.CommitSHA
-	change.CurrentTag = findTagForCommit(tags, currentRef)
+	change.CurrentTag = findTagForCommit(actionPath, tags, currentRef)
 	currentVersion := change.CurrentTag
 	if strings.TrimSpace(currentVersion) == "" {
 		currentVersion = displayRef(change.CurrentRef)
@@ -376,36 +376,72 @@ func (r *tagResolver) transformLine(ctx context.Context, workflow, line string, 
 	return newLine, &change, newLine != line, nil
 }
 
-func (r *tagResolver) selectUpgradeTarget(ctx context.Context, owner, repo string, tags []githubclient.Tag, trackedMajor int, currentCommit string) (*githubclient.Tag, upgradeState, string, *githubclient.Tag, string, error) {
+func (r *tagResolver) selectUpgradeTarget(ctx context.Context, actionPath, owner, repo string, tags []githubclient.Tag, trackedMajor int, currentCommit string) (*githubclient.Tag, upgradeState, string, *githubclient.Tag, string, error) {
 	var (
 		highestMajor       *githubclient.Tag
+		highestMajorVer    tagVersion
 		highestMajorSafe   *githubclient.Tag
+		highestMajorSafeVer tagVersion
 		highestMajorReason string
 		sameMajorReason    string
 		bestSameMajor      *githubclient.Tag
+		bestSameMajorVer   tagVersion
 		currentIsPinned    bool
+		currentVersion     tagVersion
+		hasCurrentVersion  bool
 	)
 
 	for _, tag := range tags {
-		ver := parseTagVersion(tag.Name)
+		normalized, ok := normalizeActionTagName(actionPath, tag.Name)
+		if !ok {
+			continue
+		}
+
+		ver := parseTagVersion(normalized)
+		if !ver.valid || ver.major != trackedMajor {
+			continue
+		}
+
+		if strings.EqualFold(tag.CommitSHA, currentCommit) {
+			currentIsPinned = true
+			if !hasCurrentVersion || ver.compare(currentVersion) > 0 {
+				currentVersion = ver
+				hasCurrentVersion = true
+			}
+		}
+	}
+
+	for _, tag := range tags {
+		normalized, ok := normalizeActionTagName(actionPath, tag.Name)
+		if !ok {
+			continue
+		}
+
+		ver := parseTagVersion(normalized)
+		if !ver.valid {
+			continue
+		}
+
 		if ver.major > trackedMajor {
-			if highestMajor == nil {
+			if highestMajor == nil || ver.compare(highestMajorVer) > 0 {
 				clone := tag
 				highestMajor = &clone
+				highestMajorVer = ver
 			}
 
-			if highestMajorSafe == nil {
-				safe, reason, err := r.isTagSafe(ctx, owner, repo, tag.CommitSHA)
-				if err != nil {
-					return nil, upgradeStateNone, "", highestMajorSafe, reason, err
-				}
-				if safe {
+			safe, reason, err := r.isTagSafe(ctx, owner, repo, tag.CommitSHA)
+			if err != nil {
+				return nil, upgradeStateNone, "", highestMajorSafe, reason, err
+			}
+			if safe {
+				if highestMajorSafe == nil || ver.compare(highestMajorSafeVer) > 0 {
 					clone := tag
 					highestMajorSafe = &clone
+					highestMajorSafeVer = ver
 					highestMajorReason = ""
-				} else if highestMajorReason == "" {
-					highestMajorReason = fmt.Sprintf("%s: %s", tag.Name, reason)
 				}
+			} else if highestMajorReason == "" {
+				highestMajorReason = fmt.Sprintf("%s: %s", tag.Name, reason)
 			}
 			continue
 		}
@@ -426,14 +462,15 @@ func (r *tagResolver) selectUpgradeTarget(ctx context.Context, owner, repo strin
 			continue
 		}
 
-		if strings.EqualFold(tag.CommitSHA, currentCommit) {
-			currentIsPinned = true
+		if hasCurrentVersion && ver.compare(currentVersion) <= 0 {
 			continue
 		}
 
 		clone := tag
-		bestSameMajor = &clone
-		break
+		if bestSameMajor == nil || ver.compare(bestSameMajorVer) > 0 {
+			bestSameMajor = &clone
+			bestSameMajorVer = ver
+		}
 	}
 
 	if r.allowMajor && highestMajorSafe != nil {
@@ -628,27 +665,90 @@ func displayRef(ref string) string {
 	return ref
 }
 
-func findTagForCommit(tags []githubclient.Tag, commit string) string {
+func findTagForCommit(actionPath string, tags []githubclient.Tag, commit string) string {
 	commit = strings.TrimSpace(commit)
 	if commit == "" {
 		return ""
 	}
+
+	best := ""
+	bestVer := tagVersion{}
+	found := false
 	for _, tag := range tags {
-		if strings.EqualFold(tag.CommitSHA, commit) {
-			return tag.Name
+		if !strings.EqualFold(tag.CommitSHA, commit) {
+			continue
+		}
+
+		normalized, ok := normalizeActionTagName(actionPath, tag.Name)
+		if !ok {
+			continue
+		}
+
+		ver := parseTagVersion(normalized)
+		if !ver.valid {
+			continue
+		}
+
+		if !found || ver.compare(bestVer) > 0 {
+			best = tag.Name
+			bestVer = ver
+			found = true
 		}
 	}
+
+	if found {
+		return best
+	}
+
 	return ""
 }
 
-func parseTagVersion(name string) struct{ major, minor, patch int } {
+type tagVersion struct {
+	major int
+	minor int
+	patch int
+	valid bool
+}
+
+func (v tagVersion) compare(other tagVersion) int {
+	if v.major != other.major {
+		if v.major > other.major {
+			return 1
+		}
+		return -1
+	}
+	if v.minor != other.minor {
+		if v.minor > other.minor {
+			return 1
+		}
+		return -1
+	}
+	if v.patch != other.patch {
+		if v.patch > other.patch {
+			return 1
+		}
+		return -1
+	}
+	return 0
+}
+
+func parseTagVersion(name string) tagVersion {
 	trimmed := strings.TrimPrefix(name, "v")
 	parts := strings.SplitN(trimmed, ".", 3)
 	if len(parts) != 3 {
-		return struct{ major, minor, patch int }{}
+		return tagVersion{}
 	}
-	major, _ := strconv.Atoi(parts[0])
-	minor, _ := strconv.Atoi(parts[1])
-	patch, _ := strconv.Atoi(parts[2])
-	return struct{ major, minor, patch int }{major: major, minor: minor, patch: patch}
+	major, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return tagVersion{}
+	}
+	minor, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return tagVersion{}
+	}
+	patch, err := strconv.Atoi(parts[2])
+	if err != nil {
+		return tagVersion{}
+	}
+	return tagVersion{major: major, minor: minor, patch: patch, valid: true}
 }

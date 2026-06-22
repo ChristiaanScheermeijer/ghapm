@@ -445,24 +445,6 @@ func enforceInitSafety(ctx context.Context, resolver *initResolver, actionPath, 
 	return "", fmt.Sprintf("No eligible release in major v%d satisfies the %d-day safety window", major, safetyWindowDays), nil
 }
 
-func normalizeActionTagName(actionPath, tagName string) (string, bool) {
-	parts := strings.Split(actionPath, "/")
-	if len(parts) <= 2 {
-		return tagName, true
-	}
-
-	subpath := strings.Join(parts[2:], "/")
-	prefixes := []string{subpath + "-", strings.ReplaceAll(subpath, "/", "-") + "-"}
-
-	for _, prefix := range prefixes {
-		if strings.HasPrefix(tagName, prefix) {
-			return strings.TrimPrefix(tagName, prefix), true
-		}
-	}
-
-	return "", false
-}
-
 func mergeTrackingComment(existing string, major int) string {
 	trimmed := strings.TrimSpace(existing)
 	annotation := fmt.Sprintf("ghapm:v%d", major)
