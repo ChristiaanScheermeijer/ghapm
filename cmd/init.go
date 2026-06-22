@@ -78,7 +78,7 @@ type initFileStats struct {
 }
 
 var (
-	initUsesLineExpr        = regexp.MustCompile(`^(\s*(?:-\s*)?uses:\s*)([^\s#]+)(\s*)(?:#\s*(.+))?$`)
+	initUsesLineExpr        = regexp.MustCompile(`^(\s*(?:-\s*)?uses:\s*)(.+?)(\s*)(?:#\s*(.+))?$`)
 	majorVersionCandidateRe = regexp.MustCompile(`^[vV]?(\d+)`)
 )
 
@@ -88,6 +88,10 @@ type initResolver struct {
 
 func (r *initResolver) Resolve(ctx context.Context, owner, repo, ref string) (string, error) {
 	return r.client.ResolveRef(ctx, owner, repo, ref)
+}
+
+func (r *initResolver) ListTags(ctx context.Context, owner, repo string) ([]githubclient.Tag, error) {
+	return r.client.ListTags(ctx, owner, repo)
 }
 
 func runInit(ctx context.Context, workflowDir string, dryRun bool, useAPI bool) (initReport, error) {
@@ -244,11 +248,45 @@ func transformInitLine(ctx context.Context, resolver *initResolver, workflow, li
 		return line, &change, false, nil
 	}
 
+	// Try to detect major version from the ref name first
 	major, ok := detectMajorVersion(change.OriginalRef)
 	if !ok {
-		change.Status = "skipped"
-		change.Message = fmt.Sprintf("Cannot determine major version from ref %q", change.OriginalRef)
-		return line, &change, false, nil
+		// For refs like 'latest', 'main', 'master', we need to resolve to SHA first
+		// then try to find associated tags to determine major version
+		sha, err := resolver.Resolve(ctx, owner, repo, change.OriginalRef)
+		if err != nil {
+			change.Status = "error"
+			change.Message = err.Error()
+			return line, &change, false, err
+		}
+
+		// Try to find tags pointing to this commit to determine major version
+		major, ok = detectMajorVersionFromCommit(ctx, resolver, owner, repo, sha)
+		if !ok {
+			change.Status = "skipped"
+			change.Message = fmt.Sprintf("Cannot determine major version from ref %q", change.OriginalRef)
+			return line, &change, false, nil
+		}
+
+		// Successfully resolved and found major version
+		change.Status = "pinned"
+		change.NewRef = sha
+		change.TrackingMajor = &major
+		change.Message = fmt.Sprintf("Pinned to commit %s", shortCommit(sha))
+
+		newUses := actionMatch[1] + "@" + sha
+		comment := mergeTrackingComment(commentValue, major)
+		spacing := commentSpacing
+		if comment != "" && spacing == "" {
+			spacing = " "
+		}
+
+		newLine := prefix + newUses
+		if comment != "" {
+			newLine += spacing + "# " + comment
+		}
+
+		return newLine, &change, newLine != line, nil
 	}
 
 	sha, err := resolver.Resolve(ctx, owner, repo, change.OriginalRef)
@@ -300,6 +338,29 @@ func detectMajorVersion(ref string) (int, bool) {
 	}
 
 	return 0, false
+}
+
+func detectMajorVersionFromCommit(ctx context.Context, resolver *initResolver, owner, repo, sha string) (int, bool) {
+	tags, err := resolver.ListTags(ctx, owner, repo)
+	if err != nil {
+		return 0, false
+	}
+
+	var highestMajor int
+	found := false
+
+	for _, tag := range tags {
+		if tag.CommitSHA == sha {
+			if major, ok := detectMajorVersion(tag.Name); ok {
+				if major > highestMajor || !found {
+					highestMajor = major
+					found = true
+				}
+			}
+		}
+	}
+
+	return highestMajor, found
 }
 
 func mergeTrackingComment(existing string, major int) string {

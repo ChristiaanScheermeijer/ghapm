@@ -69,7 +69,7 @@ type checkReport struct {
 }
 
 var (
-	usesLineExpr = regexp.MustCompile(`^\s*uses:\s*([^\s#]+)\s*(?:#\s*(.+))?$`)
+	usesLineExpr = regexp.MustCompile(`^(\s*(?:-\s*)?uses:\s*)(.+?)(\s*)(?:#\s*(.+))?$`)
 )
 
 func buildCheckReport(workflowDir string) (checkReport, error) {
@@ -155,8 +155,11 @@ func parseWorkflowFile(path string) ([]checkRecord, error) {
 			continue
 		}
 
-		usesValue := strings.TrimSpace(match[1])
-		commentValue := strings.TrimSpace(match[2])
+		usesValue := strings.TrimSpace(match[2])
+		commentValue := ""
+		if len(match) >= 5 {
+			commentValue = strings.TrimSpace(match[4])
+		}
 
 		record := checkRecord{
 			Workflow: filepath.ToSlash(path),

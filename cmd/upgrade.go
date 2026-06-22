@@ -234,7 +234,7 @@ type tagResolver struct {
 	safetyWindowDays int
 }
 
-var upgradeUsesLineExpr = regexp.MustCompile(`^(\s*(?:-\s*)?uses:\s*)([^\s#]+)(\s*)(?:#\s*(.+))?$`)
+var upgradeUsesLineExpr = regexp.MustCompile(`^(\s*(?:-\s*)?uses:\s*)(.+?)(\s*)(?:#\s*(.+))?$`)
 
 func (r *tagResolver) transformLine(ctx context.Context, workflow, line string, lineNumber int) (string, *upgradeChange, bool, error) {
 	match := upgradeUsesLineExpr.FindStringSubmatch(line)
