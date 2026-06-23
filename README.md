@@ -11,9 +11,18 @@ GitHub Actions Package Manager (ghapm) keeps your workflow files reproducible by
 + uses: actions/checkout@<hash> # ghapm:v4
 ```
 
+### Why should you use ghapm?
+
+- **No lock-in**: ghapm only rewrites workflow YAML; there is no runtime dependency, GitHub Action dependency, or required service.
+- **Free and open source**: use, inspect, and contribute without vendor restrictions.
+- **Safer upgrades by default**: releases can be delayed with the safety window to reduce exposure to fresh supply-chain compromises.
+- **Easy workflow maintenance**: initialize once, then use `check` and `upgrade` to keep action refs healthy and consistent.
+- **Reproducible CI**: commit-pinned `uses:` references make workflow runs deterministic across environments and time.
+- **Clear audit trail**: tracking comments (`# ghapm:...`) make upgrade intent explicit in code review.
+
 > [!WARNING]
 > ghapm is a work in progress. Behavior, command flags, and output formats may change between releases.
-
+> Please try it and share feedback or feature requests via GitHub Issues.
 
 ## Installation
 
