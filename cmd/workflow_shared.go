@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -8,7 +9,10 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
+
+	githubclient "github.com/christiaanscheermeijer/ghapm/internal/githubclient"
 )
 
 var (
@@ -16,8 +20,13 @@ var (
 
 	actionRefExpr     = regexp.MustCompile(`^([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*)@([^@]+)$`)
 	shaExpr           = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
-	trackingCommentRe = regexp.MustCompile(`ghapm:v(\d+)`)
+	trackingCommentRe = regexp.MustCompile(`ghapm:\s*([A-Za-z0-9_.-]*?)v(\d+)`)
 )
+
+type trackingInfo struct {
+	TagPrefix string
+	Major     int
+}
 
 func discoverWorkflowFiles(workflowDir string) ([]string, error) {
 	entries, err := os.ReadDir(workflowDir)
@@ -51,20 +60,41 @@ func intPtr(v int) *int {
 	return p
 }
 
-func normalizeActionTagName(actionPath, tagName string) (string, bool) {
-	parts := strings.Split(actionPath, "/")
-	if len(parts) <= 2 {
-		return tagName, true
+const defaultTagQueryPrefix = "v"
+
+func listTagsForActionWithQuery(ctx context.Context, client githubclient.Client, owner, repo, query string) ([]githubclient.Tag, error) {
+	if withQuery, ok := client.(githubclient.QueryTagLister); ok {
+		return withQuery.ListTagsWithQuery(ctx, owner, repo, query)
 	}
 
-	subpath := strings.Join(parts[2:], "/")
-	prefixes := []string{subpath + "-", strings.ReplaceAll(subpath, "/", "-") + "-"}
+	tags, err := client.ListTags(ctx, owner, repo)
+	if err != nil {
+		return nil, err
+	}
 
-	for _, prefix := range prefixes {
-		if strings.HasPrefix(tagName, prefix) {
-			return strings.TrimPrefix(tagName, prefix), true
+	filtered := make([]githubclient.Tag, 0, len(tags))
+	for _, tag := range tags {
+		if strings.HasPrefix(strings.ToLower(tag.Name), strings.ToLower(query)) {
+			filtered = append(filtered, tag)
 		}
 	}
+	return filtered, nil
+}
 
-	return "", false
+func parseTrackingComment(comment string) (trackingInfo, bool) {
+	match := trackingCommentRe.FindStringSubmatch(comment)
+	if match == nil {
+		return trackingInfo{}, false
+	}
+
+	major, err := strconv.Atoi(match[2])
+	if err != nil {
+		return trackingInfo{}, false
+	}
+
+	return trackingInfo{TagPrefix: match[1], Major: major}, true
+}
+
+func trackingAnnotation(prefix string, major int) string {
+	return fmt.Sprintf("ghapm:%sv%d", prefix, major)
 }

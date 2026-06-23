@@ -282,30 +282,26 @@ func (r *tagResolver) transformLine(ctx context.Context, workflow, line string, 
 		return line, &change, false, nil
 	}
 
-	trackingComment := trackingCommentRe.FindStringSubmatch(commentValue)
-	if trackingComment == nil {
+	tracked, ok := parseTrackingComment(commentValue)
+	if !ok {
 		change.Status = "skipped"
-		change.Message = "Missing '# ghapm:v<major>' tracking comment"
+		change.Message = "Missing '# ghapm:<prefix>v<major>' tracking comment"
 		return line, &change, false, nil
 	}
 
-	trackedMajor, err := strconv.Atoi(trackingComment[1])
-	if err != nil {
-		change.Status = "skipped"
-		change.Message = "Unable to parse tracked major from comment"
-		return line, &change, false, nil
-	}
+	trackedMajor := tracked.Major
+	trackingPrefix := tracked.TagPrefix
 
 	change.TrackedMajor = intPtr(trackedMajor)
 
-	tags, err := r.client.ListTags(ctx, parts[0], parts[1])
+	tags, err := listTagsForActionWithQuery(ctx, r.client, parts[0], parts[1], trackingPrefixForQuery(actionPath, trackingPrefix))
 	if err != nil {
 		change.Status = "error"
 		change.Message = err.Error()
 		return line, &change, false, err
 	}
 
-	targetTag, state, reason, majorCandidate, majorReason, err := r.selectUpgradeTarget(ctx, actionPath, parts[0], parts[1], tags, trackedMajor, currentRef)
+	targetTag, state, reason, majorCandidate, majorReason, err := r.selectUpgradeTarget(ctx, parts[0], parts[1], tags, trackingPrefix, trackedMajor, currentRef)
 	if err != nil {
 		change.Status = "error"
 		change.Message = err.Error()
@@ -343,11 +339,12 @@ func (r *tagResolver) transformLine(ctx context.Context, workflow, line string, 
 		return line, &change, false, nil
 	}
 
-	ver := parseTagVersion(targetTag.Name)
+	normalizedTarget, _ := normalizeTagForTracking(targetTag.Name, trackingPrefix)
+	ver := parseTagVersion(normalizedTarget)
 	change.TargetMajor = intPtr(ver.major)
 	change.TargetTag = targetTag.Name
 	change.TargetRef = targetTag.CommitSHA
-	change.CurrentTag = findTagForCommit(actionPath, tags, currentRef)
+	change.CurrentTag = findTagForCommit(tags, trackingPrefix, currentRef)
 	currentVersion := change.CurrentTag
 	if strings.TrimSpace(currentVersion) == "" {
 		currentVersion = displayRef(change.CurrentRef)
@@ -361,7 +358,7 @@ func (r *tagResolver) transformLine(ctx context.Context, workflow, line string, 
 	}
 
 	newUses := actionPath + "@" + targetTag.CommitSHA
-	comment := mergeTrackingComment(commentValue, *change.TargetMajor)
+	comment := mergeTrackingComment(commentValue, trackingPrefix, *change.TargetMajor)
 	spacing := commentSpacing
 	if comment != "" && spacing == "" {
 		spacing = " "
@@ -376,7 +373,7 @@ func (r *tagResolver) transformLine(ctx context.Context, workflow, line string, 
 	return newLine, &change, newLine != line, nil
 }
 
-func (r *tagResolver) selectUpgradeTarget(ctx context.Context, actionPath, owner, repo string, tags []githubclient.Tag, trackedMajor int, currentCommit string) (*githubclient.Tag, upgradeState, string, *githubclient.Tag, string, error) {
+func (r *tagResolver) selectUpgradeTarget(ctx context.Context, owner, repo string, tags []githubclient.Tag, trackingPrefix string, trackedMajor int, currentCommit string) (*githubclient.Tag, upgradeState, string, *githubclient.Tag, string, error) {
 	var (
 		highestMajor       *githubclient.Tag
 		highestMajorVer    tagVersion
@@ -392,7 +389,7 @@ func (r *tagResolver) selectUpgradeTarget(ctx context.Context, actionPath, owner
 	)
 
 	for _, tag := range tags {
-		normalized, ok := normalizeActionTagName(actionPath, tag.Name)
+		normalized, ok := normalizeTagForTracking(tag.Name, trackingPrefix)
 		if !ok {
 			continue
 		}
@@ -412,7 +409,7 @@ func (r *tagResolver) selectUpgradeTarget(ctx context.Context, actionPath, owner
 	}
 
 	for _, tag := range tags {
-		normalized, ok := normalizeActionTagName(actionPath, tag.Name)
+		normalized, ok := normalizeTagForTracking(tag.Name, trackingPrefix)
 		if !ok {
 			continue
 		}
@@ -665,7 +662,7 @@ func displayRef(ref string) string {
 	return ref
 }
 
-func findTagForCommit(actionPath string, tags []githubclient.Tag, commit string) string {
+func findTagForCommit(tags []githubclient.Tag, trackingPrefix string, commit string) string {
 	commit = strings.TrimSpace(commit)
 	if commit == "" {
 		return ""
@@ -679,7 +676,7 @@ func findTagForCommit(actionPath string, tags []githubclient.Tag, commit string)
 			continue
 		}
 
-		normalized, ok := normalizeActionTagName(actionPath, tag.Name)
+		normalized, ok := normalizeTagForTracking(tag.Name, trackingPrefix)
 		if !ok {
 			continue
 		}

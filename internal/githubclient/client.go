@@ -17,8 +17,10 @@ import (
 
 // Tag represents a Git reference returned from GitHub's tag listing.
 type Tag struct {
-	Name      string
-	CommitSHA string
+	Name            string
+	CommitSHA       string
+	CommitDate      time.Time
+	CommitDateKnown bool
 }
 
 // Client abstracts GitHub interactions needed by ghapm.
@@ -32,11 +34,17 @@ type Client interface {
 	ResolveRef(ctx context.Context, owner, repo, ref string) (string, error)
 }
 
+// QueryTagLister is implemented by clients that can fetch tags using a prefix query.
+type QueryTagLister interface {
+	ListTagsWithQuery(ctx context.Context, owner, repo, query string) ([]Tag, error)
+}
+
 // NewCachingClient wraps an inner client with in-memory caching to avoid duplicate requests.
 func NewCachingClient(inner Client) Client {
 	return &cachingClient{
 		inner:      inner,
 		tagCache:   make(map[string][]Tag),
+		tagQueryCache: make(map[string][]Tag),
 		commitDate: make(map[string]map[string]commitEntry),
 		refCache:   make(map[string]map[string]string),
 	}
@@ -99,28 +107,71 @@ type cachingClient struct {
 	inner      Client
 	mu         sync.Mutex
 	tagCache   map[string][]Tag
+	tagQueryCache map[string][]Tag
 	commitDate map[string]map[string]commitEntry
 	refCache   map[string]map[string]string
 }
 
 func (c *cachingClient) ListTags(ctx context.Context, owner, repo string) ([]Tag, error) {
+	return c.ListTagsWithQuery(ctx, owner, repo, "")
+}
+
+func (c *cachingClient) ListTagsWithQuery(ctx context.Context, owner, repo, query string) ([]Tag, error) {
 	key := owner + "/" + repo
+	cacheKey := key + "|" + strings.ToLower(strings.TrimSpace(query))
 	c.mu.Lock()
-	if tags, ok := c.tagCache[key]; ok {
+	if tags, ok := c.tagQueryCache[cacheKey]; ok {
 		c.mu.Unlock()
-		logf("cache hit: tags for %s/%s", owner, repo)
+		if strings.TrimSpace(query) == "" {
+			logf("cache hit: tags for %s/%s", owner, repo)
+		} else {
+			logf("cache hit: tags for %s/%s query=%q", owner, repo, query)
+		}
 		return tags, nil
 	}
 	c.mu.Unlock()
-	logf("fetching tags for %s/%s", owner, repo)
+	if strings.TrimSpace(query) == "" {
+		logf("fetching tags for %s/%s", owner, repo)
+	} else {
+		logf("fetching tags for %s/%s query=%q", owner, repo, query)
+	}
 
-	tags, err := c.inner.ListTags(ctx, owner, repo)
+	var (
+		tags []Tag
+		err error
+	)
+	if withQuery, ok := c.inner.(QueryTagLister); ok {
+		tags, err = withQuery.ListTagsWithQuery(ctx, owner, repo, query)
+	} else {
+		tags, err = c.inner.ListTags(ctx, owner, repo)
+		if err == nil && strings.TrimSpace(query) != "" {
+			tags = filterTagsByPrefix(tags, query)
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
 
 	c.mu.Lock()
-	c.tagCache[key] = tags
+	c.tagQueryCache[cacheKey] = tags
+	if strings.TrimSpace(query) == "" {
+		c.tagCache[key] = tags
+	}
+	repoDates, ok := c.commitDate[key]
+	if !ok {
+		repoDates = make(map[string]commitEntry)
+		c.commitDate[key] = repoDates
+	}
+	for _, tag := range tags {
+		sha := strings.ToLower(strings.TrimSpace(tag.CommitSHA))
+		if sha == "" {
+			continue
+		}
+		if !tag.CommitDateKnown {
+			continue
+		}
+		repoDates[sha] = commitEntry{when: tag.CommitDate.UTC(), ok: true, set: true}
+	}
 	c.mu.Unlock()
 	logf("cached %d tags for %s/%s", len(tags), owner, repo)
 	return tags, nil
@@ -196,43 +247,202 @@ func (c *cachingClient) ResolveRef(ctx context.Context, owner, repo, ref string)
 type cliClient struct{}
 
 func (cli *cliClient) ListTags(ctx context.Context, owner, repo string) ([]Tag, error) {
-	const perPage = 100
-	var tags []Tag
+	return cli.ListTagsWithQuery(ctx, owner, repo, "")
+}
 
-	for page := 1; ; page++ {
-		endpoint := fmt.Sprintf("repos/%s/%s/tags?per_page=%d&page=%d", owner, repo, perPage, page)
-		logf("gh api: %s", endpoint)
-		out, err := cli.run(ctx, endpoint)
+func (cli *cliClient) ListTagsWithQuery(ctx context.Context, owner, repo, queryPrefix string) ([]Tag, error) {
+	const (
+		perPage = 100
+		queryAll = `query TagRefs($owner: String!, $repo: String!, $first: Int!, $after: String) {
+  repository(owner: $owner, name: $repo) {
+    refs(
+      refPrefix: "refs/tags/"
+      first: $first
+      after: $after
+      orderBy: { field: TAG_COMMIT_DATE, direction: DESC }
+    ) {
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+      nodes {
+        name
+        target {
+          __typename
+          ... on Commit {
+            oid
+            committedDate
+          }
+          ... on Tag {
+            target {
+              __typename
+              ... on Commit {
+                oid
+                committedDate
+              }
+              ... on Tag {
+                target {
+                  __typename
+                  ... on Commit {
+                    oid
+                    committedDate
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}`
+		queryFiltered = `query TagRefs($owner: String!, $repo: String!, $first: Int!, $after: String, $queryFilter: String!) {
+  repository(owner: $owner, name: $repo) {
+    refs(
+      refPrefix: "refs/tags/"
+      first: $first
+      after: $after
+      query: $queryFilter
+      orderBy: { field: TAG_COMMIT_DATE, direction: DESC }
+    ) {
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+      nodes {
+        name
+        target {
+          __typename
+          ... on Commit {
+            oid
+            committedDate
+          }
+          ... on Tag {
+            target {
+              __typename
+              ... on Commit {
+                oid
+                committedDate
+              }
+              ... on Tag {
+                target {
+                  __typename
+                  ... on Commit {
+                    oid
+                    committedDate
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}`
+	)
+
+	var tags []Tag
+	after := ""
+	trimmedQuery := strings.TrimSpace(queryPrefix)
+	gqlQuery := queryAll
+	if trimmedQuery != "" {
+		gqlQuery = queryFiltered
+	}
+
+	for {
+		out, err := cli.runGraphQL(ctx, gqlQuery, owner, repo, perPage, after, trimmedQuery)
 		if err != nil {
 			return nil, err
 		}
 
-		var resp []struct {
-			Name   string `json:"name"`
-			Commit struct {
-				SHA string `json:"sha"`
-			} `json:"commit"`
+		var resp struct {
+			Data struct {
+				Repository struct {
+					Refs struct {
+						PageInfo struct {
+							HasNextPage bool   `json:"hasNextPage"`
+							EndCursor   string `json:"endCursor"`
+						} `json:"pageInfo"`
+						Nodes []struct {
+							Name   string           `json:"name"`
+							Target graphQLGitObject `json:"target"`
+						} `json:"nodes"`
+					} `json:"refs"`
+				} `json:"repository"`
+			} `json:"data"`
+			Errors []struct {
+				Message string `json:"message"`
+			} `json:"errors"`
 		}
 
 		if err := json.Unmarshal(out, &resp); err != nil {
-			return nil, fmt.Errorf("parse gh output for %s: %w", endpoint, err)
+			return nil, fmt.Errorf("parse gh graphql output: %w", err)
+		}
+		if len(resp.Errors) > 0 {
+			return nil, fmt.Errorf("gh graphql error: %s", resp.Errors[0].Message)
 		}
 
-		if len(resp) == 0 {
+		nodes := resp.Data.Repository.Refs.Nodes
+		if len(nodes) == 0 {
 			break
 		}
 
-		for _, item := range resp {
-			tags = append(tags, Tag{Name: item.Name, CommitSHA: item.Commit.SHA})
+		for _, item := range nodes {
+			sha, when, ok := extractGraphQLCommit(item.Target)
+			if !ok {
+				continue
+			}
+			tag := Tag{Name: item.Name, CommitSHA: sha}
+			if !when.IsZero() {
+				tag.CommitDate = when.UTC()
+				tag.CommitDateKnown = true
+			}
+			tags = append(tags, tag)
 		}
 
-		if len(resp) < perPage {
+		if !resp.Data.Repository.Refs.PageInfo.HasNextPage {
+			break
+		}
+		after = strings.TrimSpace(resp.Data.Repository.Refs.PageInfo.EndCursor)
+		if after == "" {
 			break
 		}
 	}
 
 	sortTags(tags)
 	return tags, nil
+}
+
+type graphQLGitObject struct {
+	TypeName      string             `json:"__typename"`
+	OID           string             `json:"oid"`
+	CommittedDate string             `json:"committedDate"`
+	Target        *graphQLGitObject  `json:"target"`
+}
+
+func extractGraphQLCommit(obj graphQLGitObject) (string, time.Time, bool) {
+	current := &obj
+	for depth := 0; depth < 5 && current != nil; depth++ {
+		t := strings.TrimSpace(current.TypeName)
+		if strings.EqualFold(t, "Commit") {
+			sha := strings.TrimSpace(current.OID)
+			if sha == "" {
+				return "", time.Time{}, false
+			}
+			when := time.Time{}
+			if ds := strings.TrimSpace(current.CommittedDate); ds != "" {
+				parsed, err := time.Parse(time.RFC3339, ds)
+				if err == nil {
+					when = parsed.UTC()
+				}
+			}
+			return sha, when, true
+		}
+		current = current.Target
+	}
+
+	return "", time.Time{}, false
 }
 
 func (cli *cliClient) CommitDate(ctx context.Context, owner, repo, sha string) (time.Time, bool, error) {
@@ -279,6 +489,29 @@ func (cli *cliClient) run(ctx context.Context, endpoint string) ([]byte, error) 
 	if err != nil {
 		return nil, fmt.Errorf("gh api %s: %v: %s", endpoint, err, strings.TrimSpace(string(output)))
 	}
+	return output, nil
+}
+
+func (cli *cliClient) runGraphQL(ctx context.Context, query, owner, repo string, first int, after, queryFilter string) ([]byte, error) {
+	if strings.TrimSpace(queryFilter) == "" {
+		logf("gh api graphql: repository %s/%s tags", owner, repo)
+	} else {
+		logf("gh api graphql: repository %s/%s tags query=%q", owner, repo, queryFilter)
+	}
+	args := []string{"api", "graphql", "-f", "query=" + query, "-F", "owner=" + owner, "-F", "repo=" + repo, "-F", fmt.Sprintf("first=%d", first)}
+	if strings.TrimSpace(after) != "" {
+		args = append(args, "-F", "after="+after)
+	}
+	if strings.TrimSpace(queryFilter) != "" {
+		args = append(args, "-F", "queryFilter="+queryFilter)
+	}
+
+	cmd := exec.CommandContext(ctx, "gh", args...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("gh api graphql %s/%s tags: %v: %s", owner, repo, err, strings.TrimSpace(string(output)))
+	}
+
 	return output, nil
 }
 
@@ -380,6 +613,10 @@ type restClient struct {
 }
 
 func (r *restClient) ListTags(ctx context.Context, owner, repo string) ([]Tag, error) {
+	return r.ListTagsWithQuery(ctx, owner, repo, "")
+}
+
+func (r *restClient) ListTagsWithQuery(ctx context.Context, owner, repo, query string) ([]Tag, error) {
 	const perPage = 100
 	const maxPages = 5
 
@@ -412,6 +649,9 @@ func (r *restClient) ListTags(ctx context.Context, owner, repo string) ([]Tag, e
 	}
 
 	sortTags(tags)
+	if strings.TrimSpace(query) != "" {
+		tags = filterTagsByPrefix(tags, query)
+	}
 	return tags, nil
 }
 
@@ -645,6 +885,21 @@ func parseTagVersion(name string) tagVersion {
 	minor, _ := strconv.Atoi(parts[1])
 	patch, _ := strconv.Atoi(parts[2])
 	return tagVersion{major: major, minor: minor, patch: patch}
+}
+
+func filterTagsByPrefix(tags []Tag, prefix string) []Tag {
+	prefix = strings.ToLower(strings.TrimSpace(prefix))
+	if prefix == "" {
+		return tags
+	}
+
+	filtered := make([]Tag, 0, len(tags))
+	for _, tag := range tags {
+		if strings.HasPrefix(strings.ToLower(tag.Name), prefix) {
+			filtered = append(filtered, tag)
+		}
+	}
+	return filtered
 }
 
 var _ Client = (*cliClient)(nil)

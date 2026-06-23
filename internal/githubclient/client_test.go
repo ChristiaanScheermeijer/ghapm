@@ -289,3 +289,94 @@ func TestResolveGitObjectToCommit(t *testing.T) {
 		}
 	})
 }
+
+func TestExtractGraphQLCommit(t *testing.T) {
+	t.Run("commit target", func(t *testing.T) {
+		obj := graphQLGitObject{
+			TypeName:      "Commit",
+			OID:           "abc123",
+			CommittedDate: "2026-01-02T03:04:05Z",
+		}
+
+		sha, when, ok := extractGraphQLCommit(obj)
+		if !ok {
+			t.Fatal("expected ok")
+		}
+		if sha != "abc123" {
+			t.Fatalf("sha = %q, want %q", sha, "abc123")
+		}
+		if when.IsZero() {
+			t.Fatal("expected parsed commit date")
+		}
+	})
+
+	t.Run("annotated tag points to commit", func(t *testing.T) {
+		obj := graphQLGitObject{
+			TypeName: "Tag",
+			Target: &graphQLGitObject{
+				TypeName:      "Commit",
+				OID:           "def456",
+				CommittedDate: "2026-02-03T04:05:06Z",
+			},
+		}
+
+		sha, _, ok := extractGraphQLCommit(obj)
+		if !ok {
+			t.Fatal("expected ok")
+		}
+		if sha != "def456" {
+			t.Fatalf("sha = %q, want %q", sha, "def456")
+		}
+	})
+
+	t.Run("missing commit in chain", func(t *testing.T) {
+		obj := graphQLGitObject{TypeName: "Tree"}
+		_, _, ok := extractGraphQLCommit(obj)
+		if ok {
+			t.Fatal("expected not ok")
+		}
+	})
+}
+
+func TestCachingClient_ListTagsPrimesCommitDateCache(t *testing.T) {
+	mock := &mockClient{
+		tags: []Tag{
+			{Name: "v1.2.3", CommitSHA: "ABCDEF", CommitDate: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC), CommitDateKnown: true},
+		},
+		commitDate: map[string]map[string]CommitDateResult{},
+		resolveRef: map[string]string{},
+		errors:     map[string]error{},
+	}
+
+	client := NewCachingClient(mock)
+	if _, err := client.ListTags(context.Background(), "owner", "repo"); err != nil {
+		t.Fatalf("ListTags() error = %v", err)
+	}
+
+	when, ok, err := client.CommitDate(context.Background(), "owner", "repo", "abcdef")
+	if err != nil {
+		t.Fatalf("CommitDate() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("expected cached commit date")
+	}
+	if when.IsZero() {
+		t.Fatal("expected non-zero commit date")
+	}
+}
+
+func TestFilterTagsByPrefix(t *testing.T) {
+	tags := []Tag{
+		{Name: "github-v1.2.0", CommitSHA: "a"},
+		{Name: "v1.16.2", CommitSHA: "b"},
+		{Name: "github-v1.1.9", CommitSHA: "c"},
+	}
+
+	filtered := filterTagsByPrefix(tags, "github-v")
+	if len(filtered) != 2 {
+		t.Fatalf("len(filtered) = %d, want 2", len(filtered))
+	}
+	if filtered[0].Name != "github-v1.2.0" || filtered[1].Name != "github-v1.1.9" {
+		t.Fatalf("unexpected filtered tags: %+v", filtered)
+	}
+}

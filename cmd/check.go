@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -211,17 +210,9 @@ func parseWorkflowFile(path string) ([]checkRecord, error) {
 
 		var trackingMajor *int
 		if commentValue != "" {
-			if sub := trackingCommentRe.FindStringSubmatch(commentValue); sub != nil {
-				majorValue, err := strconv.Atoi(sub[1])
-				if err != nil {
-					record.Status = "invalid-tracking-comment"
-					record.Message = "Unable to parse ghapm major version"
-					records = append(records, record)
-					continue
-				}
-
+			if tracked, ok := parseTrackingComment(commentValue); ok {
 				trackingMajor = new(int)
-				*trackingMajor = majorValue
+				*trackingMajor = tracked.Major
 				record.TrackingMajor = trackingMajor
 			} else {
 				record.Status = "invalid-tracking-comment"
@@ -237,7 +228,7 @@ func parseWorkflowFile(path string) ([]checkRecord, error) {
 			record.Message = "Ref is not pinned to a commit SHA"
 		case trackingMajor == nil:
 			record.Status = "missing-tracking-comment"
-			record.Message = "Pinned action missing '# ghapm:v<major>' tracking comment"
+			record.Message = "Pinned action missing '# ghapm:<prefix>v<major>' tracking comment"
 		default:
 			record.Status = "tracked"
 			record.Message = fmt.Sprintf("Pinned and tracking major v%d", *trackingMajor)

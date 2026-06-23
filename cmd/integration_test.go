@@ -323,7 +323,7 @@ func TestTransformInitLine_SubpathLatestUsesSubpathTags(t *testing.T) {
 	})
 	resolver := &initResolver{client: client}
 
-	line := "      uses: anomalyco/opencode/github@latest"
+	line := "      uses: anomalyco/opencode/github@latest # ghapm:github-v1"
 	newLine, change, changed, err := transformInitLine(context.Background(), resolver, "test.yml", line, 1, 0)
 
 	if err != nil {
@@ -341,8 +341,8 @@ func TestTransformInitLine_SubpathLatestUsesSubpathTags(t *testing.T) {
 	if change.TrackingMajor == nil || *change.TrackingMajor != 1 {
 		t.Fatalf("tracking major = %v, want 1", change.TrackingMajor)
 	}
-	if !strings.Contains(newLine, "# ghapm:v1") {
-		t.Fatalf("expected ghapm:v1 annotation, got %q", newLine)
+	if !strings.Contains(newLine, "# ghapm:github-v1") {
+		t.Fatalf("expected ghapm:github-v1 annotation, got %q", newLine)
 	}
 }
 
@@ -625,7 +625,7 @@ func TestFindTagForCommit(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.commit, func(t *testing.T) {
-			got := findTagForCommit("actions/checkout", tags, tt.commit)
+			got := findTagForCommit(tags, "", tt.commit)
 			if got != tt.want {
 				t.Errorf("findTagForCommit(%q) = %q, want %q", tt.commit, got, tt.want)
 			}
@@ -639,7 +639,7 @@ func TestFindTagForCommit_SubpathPrefersMatchingPrefix(t *testing.T) {
 		{Name: "github-v1.2.19", CommitSHA: "aaa"},
 	}
 
-	got := findTagForCommit("anomalyco/opencode/github", tags, "aaa")
+	got := findTagForCommit(tags, "github-", "aaa")
 	if got != "github-v1.2.19" {
 		t.Fatalf("findTagForCommit() = %q, want %q", got, "github-v1.2.19")
 	}
@@ -699,7 +699,7 @@ func TestSelectUpgradeTarget_DoesNotDowngradeUnsafeCurrent(t *testing.T) {
 		{Name: "v6.0.2", CommitSHA: "sha602"},
 	}
 
-	target, state, _, _, _, err := resolver.selectUpgradeTarget(context.Background(), "actions/checkout", "actions", "checkout", tags, 6, "sha603")
+	target, state, _, _, _, err := resolver.selectUpgradeTarget(context.Background(), "actions", "checkout", tags, "", 6, "sha603")
 	if err != nil {
 		t.Fatalf("selectUpgradeTarget() error = %v", err)
 	}
@@ -733,7 +733,7 @@ func TestSelectUpgradeTarget_SubpathIgnoresRootTags(t *testing.T) {
 		{Name: "github-v1.2.19", CommitSHA: "sha119"},
 	}
 
-	target, state, _, _, _, err := resolver.selectUpgradeTarget(context.Background(), "anomalyco/opencode/github", "anomalyco", "opencode", tags, 1, "sha119")
+	target, state, _, _, _, err := resolver.selectUpgradeTarget(context.Background(), "anomalyco", "opencode", tags, "github-", 1, "sha119")
 	if err != nil {
 		t.Fatalf("selectUpgradeTarget() error = %v", err)
 	}

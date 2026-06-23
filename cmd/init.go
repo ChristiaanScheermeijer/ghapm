@@ -82,6 +82,8 @@ type initFileStats struct {
 var (
 	initUsesLineExpr        = regexp.MustCompile(`^(\s*(?:-\s*)?uses:\s*)(.+?)(\s*)(?:#\s*(.+))?$`)
 	majorVersionCandidateRe = regexp.MustCompile(`^[vV]?(\d+)`)
+	trackingRefExpr         = regexp.MustCompile(`^([A-Za-z0-9_.-]*?)[vV](\d+)`)
+	trackingRefBareExpr     = regexp.MustCompile(`^(\d+)`)
 )
 
 type initResolver struct {
@@ -90,10 +92,6 @@ type initResolver struct {
 
 func (r *initResolver) Resolve(ctx context.Context, owner, repo, ref string) (string, error) {
 	return r.client.ResolveRef(ctx, owner, repo, ref)
-}
-
-func (r *initResolver) ListTags(ctx context.Context, owner, repo string) ([]githubclient.Tag, error) {
-	return r.client.ListTags(ctx, owner, repo)
 }
 
 func (r *initResolver) CommitDate(ctx context.Context, owner, repo, sha string) (time.Time, bool, error) {
@@ -240,12 +238,9 @@ func transformInitLine(ctx context.Context, resolver *initResolver, workflow, li
 
 	if shaExpr.MatchString(change.OriginalRef) {
 		change.Status = "already-pinned"
-		if sub := trackingCommentRe.FindStringSubmatch(commentValue); sub != nil {
-			major, err := strconv.Atoi(sub[1])
-			if err == nil {
-				change.TrackingMajor = &major
-				change.Message = fmt.Sprintf("Already pinned (tracking major v%d)", major)
-			}
+		if tracked, ok := parseTrackingComment(commentValue); ok {
+			change.TrackingMajor = &tracked.Major
+			change.Message = fmt.Sprintf("Already pinned (tracking major v%d)", tracked.Major)
 		} else if commentValue != "" {
 			change.Message = "Already pinned; preserving existing comment"
 		} else {
@@ -254,8 +249,16 @@ func transformInitLine(ctx context.Context, resolver *initResolver, workflow, li
 		return line, &change, false, nil
 	}
 
+	trackingPrefix := ""
+	if tracked, ok := parseTrackingComment(commentValue); ok {
+		trackingPrefix = tracked.TagPrefix
+	}
+
 	// Try to detect major version from the ref name first
 	major, ok := detectMajorVersion(change.OriginalRef)
+	if refPrefix, _, prefixOK := detectTrackingFromRef(change.OriginalRef); prefixOK && trackingPrefix == "" {
+		trackingPrefix = refPrefix
+	}
 	if !ok {
 		// For refs like 'latest', 'main', 'master', we need to resolve to SHA first
 		// then try to find associated tags to determine major version
@@ -267,14 +270,17 @@ func transformInitLine(ctx context.Context, resolver *initResolver, workflow, li
 		}
 
 		// Try to find tags pointing to this commit to determine major version
-		major, ok = detectMajorVersionFromCommit(ctx, resolver, actionMatch[1], owner, repo, sha)
+		major, detectedPrefix, ok := detectMajorVersionFromCommit(ctx, resolver, actionMatch[1], owner, repo, sha, trackingPrefix)
 		if !ok {
 			change.Status = "skipped"
 			change.Message = fmt.Sprintf("Cannot determine major version from ref %q", change.OriginalRef)
 			return line, &change, false, nil
 		}
+		if trackingPrefix == "" {
+			trackingPrefix = detectedPrefix
+		}
 
-		safeSHA, safeReason, err := enforceInitSafety(ctx, resolver, actionMatch[1], owner, repo, major, sha, safetyWindowDays)
+		safeSHA, safeReason, err := enforceInitSafety(ctx, resolver, actionMatch[1], owner, repo, trackingPrefix, major, sha, safetyWindowDays)
 		if err != nil {
 			change.Status = "error"
 			change.Message = err.Error()
@@ -293,7 +299,7 @@ func transformInitLine(ctx context.Context, resolver *initResolver, workflow, li
 		change.Message = fmt.Sprintf("Pinned to commit %s", shortCommit(safeSHA))
 
 		newUses := actionMatch[1] + "@" + safeSHA
-		comment := mergeTrackingComment(commentValue, major)
+		comment := mergeTrackingComment(commentValue, trackingPrefix, major)
 		spacing := commentSpacing
 		if comment != "" && spacing == "" {
 			spacing = " "
@@ -315,7 +321,7 @@ func transformInitLine(ctx context.Context, resolver *initResolver, workflow, li
 	}
 
 
-	safeSHA, safeReason, err := enforceInitSafety(ctx, resolver, actionMatch[1], owner, repo, major, sha, safetyWindowDays)
+	safeSHA, safeReason, err := enforceInitSafety(ctx, resolver, actionMatch[1], owner, repo, trackingPrefix, major, sha, safetyWindowDays)
 	if err != nil {
 		change.Status = "error"
 		change.Message = err.Error()
@@ -333,7 +339,7 @@ func transformInitLine(ctx context.Context, resolver *initResolver, workflow, li
 	change.Message = fmt.Sprintf("Pinned to commit %s", shortCommit(safeSHA))
 
 	newUses := actionMatch[1] + "@" + safeSHA
-	comment := mergeTrackingComment(commentValue, major)
+	comment := mergeTrackingComment(commentValue, trackingPrefix, major)
 	spacing := commentSpacing
 	if comment != "" && spacing == "" {
 		spacing = " "
@@ -371,34 +377,47 @@ func detectMajorVersion(ref string) (int, bool) {
 	return 0, false
 }
 
-func detectMajorVersionFromCommit(ctx context.Context, resolver *initResolver, actionPath, owner, repo, sha string) (int, bool) {
-	tags, err := resolver.ListTags(ctx, owner, repo)
+func detectMajorVersionFromCommit(ctx context.Context, resolver *initResolver, actionPath, owner, repo, sha, trackingPrefix string) (int, string, bool) {
+	_ = actionPath
+	query := trackingPrefix + "v"
+	if strings.TrimSpace(query) == "v" {
+		query = defaultTagQueryPrefix
+	}
+	tags, err := listTagsForActionWithQuery(ctx, resolver.client, owner, repo, query)
 	if err != nil {
-		return 0, false
+		return 0, "", false
 	}
 
 	var highestMajor int
+	var selectedPrefix string
 	found := false
 
 	for _, tag := range tags {
 		if tag.CommitSHA == sha {
-			normalizedTag, ok := normalizeActionTagName(actionPath, tag.Name)
+			normalizedTag, ok := normalizeTagForTracking(tag.Name, trackingPrefix)
 			if !ok {
 				continue
 			}
-			if major, ok := detectMajorVersion(normalizedTag); ok {
+			if _, major, ok := detectTrackingFromRef(normalizedTag); ok {
+				prefix := trackingPrefix
+				if prefix == "" {
+					if detectedPrefix, _, detected := detectTrackingFromRef(tag.Name); detected {
+						prefix = detectedPrefix
+					}
+				}
 				if major > highestMajor || !found {
 					highestMajor = major
+					selectedPrefix = prefix
 					found = true
 				}
 			}
 		}
 	}
 
-	return highestMajor, found
+	return highestMajor, selectedPrefix, found
 }
 
-func enforceInitSafety(ctx context.Context, resolver *initResolver, actionPath, owner, repo string, major int, resolvedSHA string, safetyWindowDays int) (string, string, error) {
+func enforceInitSafety(ctx context.Context, resolver *initResolver, actionPath, owner, repo, trackingPrefix string, major int, resolvedSHA string, safetyWindowDays int) (string, string, error) {
 	if safetyWindowDays <= 0 {
 		return resolvedSHA, "", nil
 	}
@@ -412,13 +431,13 @@ func enforceInitSafety(ctx context.Context, resolver *initResolver, actionPath, 
 		return resolvedSHA, "", nil
 	}
 
-	tags, err := resolver.ListTags(ctx, owner, repo)
+	tags, err := listTagsForActionWithQuery(ctx, resolver.client, owner, repo, trackingPrefixForQuery(actionPath, trackingPrefix))
 	if err != nil {
 		return "", "", err
 	}
 
 	for _, tag := range tags {
-		normalizedTag, ok := normalizeActionTagName(actionPath, tag.Name)
+		normalizedTag, ok := normalizeTagForTracking(tag.Name, trackingPrefix)
 		if !ok {
 			continue
 		}
@@ -445,9 +464,9 @@ func enforceInitSafety(ctx context.Context, resolver *initResolver, actionPath, 
 	return "", fmt.Sprintf("No eligible release in major v%d satisfies the %d-day safety window", major, safetyWindowDays), nil
 }
 
-func mergeTrackingComment(existing string, major int) string {
+func mergeTrackingComment(existing string, prefix string, major int) string {
 	trimmed := strings.TrimSpace(existing)
-	annotation := fmt.Sprintf("ghapm:v%d", major)
+	annotation := trackingAnnotation(prefix, major)
 
 	if trimmed == "" {
 		return annotation
@@ -458,6 +477,49 @@ func mergeTrackingComment(existing string, major int) string {
 	}
 
 	return fmt.Sprintf("%s; %s", trimmed, annotation)
+}
+
+func detectTrackingFromRef(ref string) (string, int, bool) {
+	candidate := ref
+	if strings.Contains(candidate, "/") {
+		parts := strings.Split(candidate, "/")
+		candidate = parts[len(parts)-1]
+	}
+
+	if match := trackingRefExpr.FindStringSubmatch(candidate); match != nil {
+		major, err := strconv.Atoi(match[2])
+		if err == nil {
+			return match[1], major, true
+		}
+	}
+	if match := trackingRefBareExpr.FindStringSubmatch(candidate); match != nil {
+		major, err := strconv.Atoi(match[1])
+		if err == nil {
+			return "", major, true
+		}
+	}
+	return "", 0, false
+}
+
+func normalizeTagForTracking(tagName, prefix string) (string, bool) {
+	if strings.TrimSpace(prefix) == "" {
+		if _, _, ok := detectTrackingFromRef(tagName); ok {
+			return tagName, true
+		}
+		return "", false
+	}
+	if strings.HasPrefix(tagName, prefix) {
+		return strings.TrimPrefix(tagName, prefix), true
+	}
+	return "", false
+}
+
+func trackingPrefixForQuery(actionPath, trackingPrefix string) string {
+	_ = actionPath
+	if strings.TrimSpace(trackingPrefix) != "" {
+		return trackingPrefix + "v"
+	}
+	return defaultTagQueryPrefix
 }
 
 func shortCommit(sha string) string {

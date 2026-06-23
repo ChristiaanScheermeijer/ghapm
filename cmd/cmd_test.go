@@ -73,21 +73,24 @@ func TestDetectMajorVersionWithPath(t *testing.T) {
 func TestMergeTrackingComment(t *testing.T) {
 	tests := []struct {
 		existing string
+		prefix  string
 		major    int
 		want     string
 	}{
-		{"", 4, "ghapm:v4"},
-		{"ghapm:v3", 4, "ghapm:v4"},
-		{"ghapm:v3; custom note", 5, "ghapm:v5; custom note"},
-		{"some other comment", 2, "some other comment; ghapm:v2"},
-		{"  ghapm:v1  ", 3, "ghapm:v3"},
+		{"", "", 4, "ghapm:v4"},
+		{"ghapm:v3", "", 4, "ghapm:v4"},
+		{"ghapm:v3; custom note", "", 5, "ghapm:v5; custom note"},
+		{"some other comment", "", 2, "some other comment; ghapm:v2"},
+		{"  ghapm:v1  ", "", 3, "ghapm:v3"},
+		{"", "github-", 1, "ghapm:github-v1"},
+		{"ghapm:v1", "github-", 2, "ghapm:github-v2"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.existing, func(t *testing.T) {
-			got := mergeTrackingComment(tt.existing, tt.major)
+			got := mergeTrackingComment(tt.existing, tt.prefix, tt.major)
 			if got != tt.want {
-				t.Errorf("mergeTrackingComment(%q, %d) = %q, want %q", tt.existing, tt.major, got, tt.want)
+				t.Errorf("mergeTrackingComment(%q, %q, %d) = %q, want %q", tt.existing, tt.prefix, tt.major, got, tt.want)
 			}
 		})
 	}
@@ -183,6 +186,28 @@ func TestColorizeEnvVar(t *testing.T) {
 	want := "\033[31mtest\033[0m"
 	if got != want {
 		t.Errorf("colorize without NO_COLOR = %q, want %q", got, want)
+	}
+}
+
+func TestTrackingPrefixForQuery(t *testing.T) {
+	tests := []struct {
+		action string
+		prefix string
+		want   string
+	}{
+		{action: "actions/checkout", prefix: "", want: "v"},
+		{action: "anomalyco/opencode/github", prefix: "", want: "v"},
+		{action: "org/repo/foo/bar", prefix: "", want: "v"},
+		{action: "anomalyco/opencode/github", prefix: "github-", want: "github-v"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.action+tt.prefix, func(t *testing.T) {
+			got := trackingPrefixForQuery(tt.action, tt.prefix)
+			if got != tt.want {
+				t.Errorf("trackingPrefixForQuery(%q, %q) = %q, want %q", tt.action, tt.prefix, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -375,15 +400,16 @@ func TestTrackingCommentRe(t *testing.T) {
 	tests := []struct {
 		input    string
 		wantMatch bool
+		wantPrefix string
 		wantMajor string
 	}{
-		{"ghapm:v4", true, "4"},
-		{"ghapm:v10", true, "10"},
-		{"ghapm:v0", true, "0"},
-		{"some comment; ghapm:v3", true, "3"},
-		{"ghapm:v", false, ""},
-		{"ghapm:4", false, ""},
-		{"v4", false, ""},
+		{"ghapm:v4", true, "", "4"},
+		{"ghapm:v10", true, "", "10"},
+		{"ghapm:github-v1", true, "github-", "1"},
+		{"some comment; ghapm:v3", true, "", "3"},
+		{"ghapm:v", false, "", ""},
+		{"ghapm:4", false, "", ""},
+		{"v4", false, "", ""},
 	}
 
 	for _, tt := range tests {
@@ -394,8 +420,11 @@ func TestTrackingCommentRe(t *testing.T) {
 				return
 			}
 			if tt.wantMatch {
-				if match[1] != tt.wantMajor {
-					t.Errorf("major = %q, want %q", match[1], tt.wantMajor)
+				if match[1] != tt.wantPrefix {
+					t.Errorf("prefix = %q, want %q", match[1], tt.wantPrefix)
+				}
+				if match[2] != tt.wantMajor {
+					t.Errorf("major = %q, want %q", match[2], tt.wantMajor)
 				}
 			}
 		})

@@ -54,7 +54,7 @@ What it does:
 
 - scans workflow files (default: `.github/workflows`),
 - converts floating refs such as `@v4` to commit SHAs,
-- appends or updates tracking comments: `# ghapm:v<major>`,
+- appends or updates tracking comments: `# ghapm:v<major>` or `# ghapm:<tag-prefix>v<major>`,
 - keeps already pinned SHAs and refreshes annotations when needed.
 
 Common usage:
@@ -117,7 +117,7 @@ Move pinned actions to the newest safe release.
 
 What it does:
 
-- follows the major line tracked by `# ghapm:v<major>`,
+- follows the tracked line in `# ghapm:v<major>` or `# ghapm:<tag-prefix>v<major>`,
 - upgrades SHAs to newer eligible releases,
 - enforces a safety window (default: 14 days),
 - updates the SHA and tracking comment together when needed.
