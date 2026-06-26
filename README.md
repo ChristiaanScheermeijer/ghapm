@@ -165,6 +165,14 @@ Flags:
 
 - Format code with `gofmt -w .`.
 
+## opencode Skill
+
+This repository includes an opencode skill for operating the `ghapm` binary:
+
+- `.opencode/skills/ghapm-maintainer/SKILL.md`
+
+If you use opencode from this repository, the skill is discovered automatically. Restart opencode after pulling updates so newly added or changed skill content is loaded.
+
 ## License
 
 Licensed under the Apache License 2.0. See `LICENSE`.
