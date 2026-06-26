@@ -730,22 +730,36 @@ func (v tagVersion) compare(other tagVersion) int {
 }
 
 func parseTagVersion(name string) tagVersion {
-	trimmed := strings.TrimPrefix(name, "v")
-	parts := strings.SplitN(trimmed, ".", 3)
-	if len(parts) != 3 {
+	trimmed := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(name, "v"), "V"))
+	if trimmed == "" {
 		return tagVersion{}
 	}
+
+	parts := strings.Split(trimmed, ".")
+	if len(parts) == 0 || len(parts) > 3 {
+		return tagVersion{}
+	}
+
 	major, err := strconv.Atoi(parts[0])
 	if err != nil {
 		return tagVersion{}
 	}
-	minor, err := strconv.Atoi(parts[1])
-	if err != nil {
-		return tagVersion{}
+
+	minor := 0
+	if len(parts) >= 2 {
+		minor, err = strconv.Atoi(parts[1])
+		if err != nil {
+			return tagVersion{}
+		}
 	}
-	patch, err := strconv.Atoi(parts[2])
-	if err != nil {
-		return tagVersion{}
+
+	patch := 0
+	if len(parts) == 3 {
+		patch, err = strconv.Atoi(parts[2])
+		if err != nil {
+			return tagVersion{}
+		}
 	}
+
 	return tagVersion{major: major, minor: minor, patch: patch, valid: true}
 }

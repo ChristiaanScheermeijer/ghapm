@@ -655,8 +655,9 @@ func TestParseTagVersion(t *testing.T) {
 		{"v1.2.3", 1, 2, 3},
 		{"v4.0.0", 4, 0, 0},
 		{"1.0.0", 1, 0, 0},
-		{"v1.2", 0, 0, 0},
-		{"v1", 0, 0, 0},
+		{"v1.2", 1, 2, 0},
+		{"v1", 1, 0, 0},
+		{"V2", 2, 0, 0},
 		{"latest", 0, 0, 0},
 		{"", 0, 0, 0},
 	}
@@ -745,5 +746,43 @@ func TestSelectUpgradeTarget_SubpathIgnoresRootTags(t *testing.T) {
 	}
 	if target.Name != "github-v1.2.20" {
 		t.Fatalf("target = %q, want %q", target.Name, "github-v1.2.20")
+	}
+}
+
+func TestSelectUpgradeTarget_MajorOnlyTags(t *testing.T) {
+	now := time.Now()
+
+	client := newMockClient()
+	client.AddCommit("aws-actions", "setup-sam", "sha-v2", now.Add(-40*24*time.Hour), true)
+	client.AddCommit("aws-actions", "setup-sam", "sha-v3", now.Add(-30*24*time.Hour), true)
+
+	resolver := &tagResolver{
+		client:           client,
+		allowMajor:       false,
+		enforceSafety:    true,
+		safetyWindowDays: 14,
+		cutoff:           now.Add(-14 * 24 * time.Hour),
+	}
+
+	tags := []githubclient.Tag{
+		{Name: "v3", CommitSHA: "sha-v3"},
+		{Name: "v2", CommitSHA: "sha-v2"},
+	}
+
+	target, state, _, majorCandidate, _, err := resolver.selectUpgradeTarget(context.Background(), "aws-actions", "setup-sam", tags, "", 2, "older-current")
+	if err != nil {
+		t.Fatalf("selectUpgradeTarget() error = %v", err)
+	}
+	if state != upgradeStateUpgrade {
+		t.Fatalf("state = %v, want %v", state, upgradeStateUpgrade)
+	}
+	if target == nil {
+		t.Fatal("expected same-major upgrade target")
+	}
+	if target.Name != "v2" {
+		t.Fatalf("target = %q, want %q", target.Name, "v2")
+	}
+	if majorCandidate == nil || majorCandidate.Name != "v3" {
+		t.Fatalf("majorCandidate = %+v, want v3", majorCandidate)
 	}
 }
