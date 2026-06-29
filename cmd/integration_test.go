@@ -346,6 +346,39 @@ func TestTransformInitLine_SubpathLatestUsesSubpathTags(t *testing.T) {
 	}
 }
 
+func TestTransformInitLine_CRLFDoesNotMoveAnnotationToNewline(t *testing.T) {
+	sha := "1234567890abcdef1234567890abcdef12345678"
+	client := newMockClient()
+	client.AddResolve("actions", "checkout", "v4", sha)
+	client.AddTags("actions", "checkout", []githubclient.Tag{
+		{Name: "v4.0.0", CommitSHA: sha},
+	})
+	client.AddCommit("actions", "checkout", sha, time.Now().AddDate(0, 0, -30), true)
+	resolver := &initResolver{client: client}
+
+	line := "      uses: actions/checkout@v4\r"
+	newLine, change, changed, err := transformInitLine(context.Background(), resolver, "test.yml", line, 1, 0)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !changed {
+		t.Fatal("expected line to be changed")
+	}
+	if change == nil {
+		t.Fatal("expected change record")
+	}
+	if change.Status != "pinned" {
+		t.Fatalf("status = %q, want %q", change.Status, "pinned")
+	}
+	if !strings.Contains(newLine, "# ghapm:v4") {
+		t.Fatalf("expected ghapm:v4 annotation, got %q", newLine)
+	}
+	if strings.Contains(newLine, "\r#") {
+		t.Fatalf("annotation should not be preceded by CR, got %q", newLine)
+	}
+}
+
 // --- Integration Tests for check command ---
 
 func TestParseWorkflowFile_FloatingRefs(t *testing.T) {

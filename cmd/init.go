@@ -80,7 +80,7 @@ type initFileStats struct {
 }
 
 var (
-	initUsesLineExpr        = regexp.MustCompile(`^(\s*(?:-\s*)?uses:\s*)(.+?)(\s*)(?:#\s*(.+))?$`)
+	initUsesLineExpr        = regexp.MustCompile(`^(\s*(?:-\s*)?uses:\s*)(.+?)([ \t]*)(?:#\s*(.+))?$`)
 	majorVersionCandidateRe = regexp.MustCompile(`^[vV]?(\d+)`)
 	trackingRefExpr         = regexp.MustCompile(`^([A-Za-z0-9_.-]*?)[vV](\d+)`)
 	trackingRefBareExpr     = regexp.MustCompile(`^(\d+)`)

@@ -90,7 +90,7 @@ type checkReport struct {
 }
 
 var (
-	usesLineExpr = regexp.MustCompile(`^(\s*(?:-\s*)?uses:\s*)(.+?)(\s*)(?:#\s*(.+))?$`)
+	usesLineExpr = regexp.MustCompile(`^(\s*(?:-\s*)?uses:\s*)(.+?)([ \t]*)(?:#\s*(.+))?$`)
 )
 
 func buildCheckReport(workflowDir string) (checkReport, error) {
